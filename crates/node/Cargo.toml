@@ -1,0 +1,30 @@
+[package]
+name = "node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "node"
+path = "src/main.rs"
+
+[dependencies]
+eo-core.workspace = true
+p2p = { path = "../p2p" }
+eo-raft = { path = "../raft" }
+storage = { path = "../storage" }
+sandbox = { path = "../sandbox" }
+orchestration = { path = "../orchestration" }
+eo-ipc = { path = "../ipc" }
+
+clap = { version = "4", features = ["derive", "env"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_yaml.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+libp2p = { version = "0.54", features = ["ed25519"] }

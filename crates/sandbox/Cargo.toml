@@ -1,0 +1,16 @@
+[package]
+name = "sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eo-core.workspace = true
+
+wasmtime = "45"
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+wat = "1"

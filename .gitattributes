@@ -1,0 +1,21 @@
+# Auto-detect text files, normalise line endings to LF on commit
+* text=auto
+
+# Explicit line-ending rules per type
+*.rs      text eol=lf
+*.toml    text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.json    text eol=lf
+*.py      text eol=lf
+*.sh      text eol=lf
+*.md      text eol=lf
+*.lock    text eol=lf
+Makefile  text eol=lf
+
+# Binary files
+*.wasm    binary
+*.bin     binary
+*.png     binary
+*.jpg     binary
+*.ico     binary

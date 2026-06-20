@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eo-agent"
+version = "0.1.0"
+description = "Cognitive Control Plane for Edge-Cloud Orchestrator"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-core>=0.3.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+eo-agent = "eo_agent.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eo_agent"]

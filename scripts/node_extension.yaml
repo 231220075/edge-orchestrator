@@ -1,0 +1,184 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# node_extension.yaml — New Device Onboarding Template
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# This file is the declarative configuration for adding a new node (the "3rd
+# device" or Nth device) to an existing Edge-Cloud Orchestrator cluster.
+#
+# The existing control plane (macOS node) will discover this new peer via
+# mDNS on the local subnet. When the descriptor is received, the Raft
+# consensus layer dynamically absorbs the new PeerId — no restart required.
+#
+# INSTRUCTIONS
+# ────────────
+# 1. Copy this template to the new device:
+#      scp scripts/node_extension.yaml user@new-device:~/edge-orchestrator/configs/new-node.yaml
+#
+# 2. Edit the fields below to match the new device's capabilities.
+#    See comments for guidance on each field.
+#
+# 3. On the new device, run:
+#      ./scripts/setup_env.sh
+#      ./scripts/run_node_linux.sh   (or adapt run_node_mac.sh)
+#
+# 4. On the macOS control plane, monitor the swarm to confirm discovery:
+#      tail -f logs/node_mac_*.log | grep "mDNS: discovered peer"
+#
+# 5. To verify the node is recognized by the control plane, run eo-agent:
+#      eo> Show me the full cluster topology with all peers
+#
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Node Identity ────────────────────────────────────────────────────────────
+# Leave empty to auto-generate a UUID v4 on first boot.
+# If you want a stable identity across restarts, generate one with:
+#   python3 -c "import uuid; print(uuid.uuid4())"
+node_id: ""
+
+# ── Node Type ────────────────────────────────────────────────────────────────
+#   "Heavy" — Full-featured: persistent storage, multiple runtimes, high CPU/mem.
+#              Suitable for: dedicated servers, cloud VMs, developer workstations.
+#   "Light"  — Constrained: may not have persistent storage, fewer runtimes,
+#              smaller resources. Suitable for: Raspberry Pi, IoT devices,
+#              mobile devices, edge gateways.
+node_type: "Heavy"
+
+# ── Network ───────────────────────────────────────────────────────────────────
+# Port 0 = auto-assign a random available port (recommended for mDNS discovery).
+# For static port: "/ip4/0.0.0.0/tcp/42069"
+listen_addresses:
+  - "/ip4/0.0.0.0/tcp/0"
+
+# ── Bootstrap Peers ───────────────────────────────────────────────────────────
+# When mDNS is NOT available (e.g., devices on different subnets, cloud
+# instances), hardcode the multiaddr of the macOS control plane here.
+#
+# Find the control plane's address from its logs:
+#   grep "Listening on" logs/node_mac_*.log
+# Example output: "Listening on /ip4/192.168.1.42/tcp/42069"
+#
+# Uncomment and fill in:
+# bootstrap_peers:
+#   - "/ip4/192.168.1.42/tcp/42069/p2p/12D3KooWRh8j5f..."
+bootstrap_peers: []
+
+# ── Capabilities ──────────────────────────────────────────────────────────────
+# Declare what this node CAN do. The orchestration engine uses this to decide
+# where to route tasks. Be honest — declaring capabilities you don't have
+# will cause task failures.
+capabilities:
+
+  # Does this node have persistent disk storage?
+  # true  — Can serve as a CAS storage peer (stores blobs, WAL segments).
+  # false — Stateless executor only.
+  storage: true
+
+  # Does this node have a GPU? (CUDA / Metal / Vulkan / MPS)
+  # true  — Eligible for inference/ML workloads.
+  # false — CPU-only.
+  gpu_acceleration: false
+
+  # Runtimes this node supports. Valid values:
+  #   "Wasm"        — WebAssembly via Wasmtime (cross-platform, always safe)
+  #   "NativePosix" — Native processes via Linux namespaces/cgroups
+  #   "Container"   — OCI containers via Docker/podman
+  #
+  # Common combos:
+  #   Lightweight edge (Pi, IoT):     ["Wasm"]
+  #   Linux server/VM:                ["Wasm", "NativePosix", "Container"]
+  #   macOS workstation:              ["Wasm"]
+  #   Windows PC:                     ["Wasm"]          (NativePosix/Container not supported)
+  runtimes:
+    - "Wasm"
+    # - "NativePosix"   # Uncomment if this is a Linux system
+    # - "Container"     # Uncomment if Docker is installed
+
+  # Maximum memory available for sandbox execution, in megabytes.
+  # Conservative default is 1024. Match your actual available RAM.
+  max_memory_mb: 1024
+
+  # Number of CPU cores available for execution.
+  # Conservative default is 2. Match your actual core count.
+  cpu_cores: 2
+
+# ── Requested Roles ──────────────────────────────────────────────────────────
+# What roles this node volunteers to serve. The orchestration engine may assign
+# a subset of these based on cluster needs and capability validation.
+#
+# Available roles:
+#   "Bootstrap"   — Initial seed node (only ONE in the cluster).
+#   "Coordinator" — Runs scheduling & orchestration logic.
+#   "Storage"     — Serves CAS blobs and WAL segments to peers.
+#   "Execution"   — Runs sandboxed code (needs matching runtimes above).
+#   "Inference"   — Runs ML/AI inference (needs gpu_acceleration = true).
+roles:
+  # ┌─────────────────────────────────────────────────────────────────┐
+  # │ UNCOMMENT THE ROLES THIS DEVICE SHOULD SERVE:                   │
+  # └─────────────────────────────────────────────────────────────────┘
+  # - "Storage"
+  # - "Execution"
+  # - "Inference"
+  # - "Coordinator"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXAMPLE: Cloud VM (AWS/GCP/Azure) with Docker
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   node_id: ""
+#   node_type: "Heavy"
+#   listen_addresses:
+#     - "/ip4/0.0.0.0/tcp/42069"
+#   bootstrap_peers:
+#     - "/ip4/203.0.113.5/tcp/42069/p2p/12D3KooW..."  # Your control plane
+#   capabilities:
+#     storage: true
+#     gpu_acceleration: true
+#     runtimes:
+#       - "Wasm"
+#       - "NativePosix"
+#       - "Container"
+#     max_memory_mb: 65536
+#     cpu_cores: 16
+#   roles:
+#     - "Execution"
+#     - "Storage"
+#     - "Inference"
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXAMPLE: Raspberry Pi 5 (Light edge node)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   node_id: ""
+#   node_type: "Light"
+#   listen_addresses:
+#     - "/ip4/0.0.0.0/tcp/0"
+#   bootstrap_peers: []
+#   capabilities:
+#     storage: false
+#     gpu_acceleration: false
+#     runtimes:
+#       - "Wasm"
+#     max_memory_mb: 2048
+#     cpu_cores: 4
+#   roles:
+#     - "Execution"
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXAMPLE: Windows PC (Wasm-only executor)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#   node_id: ""
+#   node_type: "Heavy"
+#   listen_addresses:
+#     - "/ip4/0.0.0.0/tcp/0"
+#   bootstrap_peers: []
+#   capabilities:
+#     storage: true
+#     gpu_acceleration: false
+#     runtimes:
+#       - "Wasm"
+#     max_memory_mb: 8192
+#     cpu_cores: 8
+#   roles:
+#     - "Execution"
+#     - "Storage"

@@ -1,0 +1,19 @@
+# Edge-Cloud Orchestrator — Node Configuration
+node_id: ""                    # Auto-generated if empty
+node_type: "Heavy"             # Heavy | Light
+
+listen_addresses:
+  - "/ip4/0.0.0.0/tcp/0"      # Listen on random port, all interfaces
+
+bootstrap_peers: []            # Empty = mDNS-only discovery
+
+capabilities:
+  storage: true
+  gpu_acceleration: false
+  runtimes:
+    - "Wasm"
+  max_memory_mb: 16384
+  cpu_cores: 4
+
+roles:                         # Roles to request on startup
+  - "Execution"

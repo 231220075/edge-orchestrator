@@ -1,0 +1,51 @@
+# ── Rust build artifacts ────────────────────────────────────────────────────
+target/
+**/*.rs.bk
+*.pdb
+
+# ── Python / virtualenv ─────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.venv/
+dist/
+build/
+*.egg
+.pytest_cache/
+
+# ── IDE / editor ────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+\#*\#
+
+# ── macOS ───────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+__MACOSX/
+
+# ── Project runtime state (local only) ──────────────────────────────────────
+logs/
+.eo_network
+.eo_bootstrap
+/tmp/eo_control.sock
+tmp/
+
+# ── Environment / secrets ───────────────────────────────────────────────────
+.env
+.env.local
+*.pem
+*.key
+
+# ── Claude Code ─────────────────────────────────────────────────────────────
+.claude/
+
+# ── Misc ────────────────────────────────────────────────────────────────────
+*.log
+*.prof
+*.tmp

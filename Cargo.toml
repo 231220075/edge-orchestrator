@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/p2p",
+    "crates/raft", # eo-raft crate
+    "crates/storage",
+    "crates/sandbox",
+    "crates/orchestration",
+    "crates/node",
+    "crates/ipc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/edge-orchestrator/edge-orchestrator"
+
+[workspace.dependencies]
+# Serde ecosystem
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Core crate (path dependency)
+eo-core = { path = "crates/core" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

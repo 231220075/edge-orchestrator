@@ -1,0 +1,22 @@
+# Edge-Cloud Orchestrator — Linux Node Configuration
+node_id: ""
+node_type: "Heavy"
+
+listen_addresses:
+  - "/ip4/0.0.0.0/tcp/0"
+
+bootstrap_peers: []
+
+capabilities:
+  storage: true
+  gpu_acceleration: false
+  runtimes:
+    - "Wasm"
+    - "NativePosix"
+    - "Container"
+  max_memory_mb: 32768
+  cpu_cores: 8
+
+roles:
+  - "Execution"
+  - "Storage"

@@ -1,0 +1,24 @@
+[package]
+name = "eo-raft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eo-core.workspace = true
+storage = { path = "../storage" }
+
+raft = { version = "0.7", package = "raft", default-features = false, features = ["prost-codec"] }
+prost = "0.11"
+tokio.workspace = true
+slog = "2"
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+lru = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
