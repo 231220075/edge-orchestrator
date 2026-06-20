@@ -18,8 +18,11 @@ use tracing::{debug, trace};
 const ENTRY_CACHE_SIZE: usize = 1024;
 
 /// Key prefixes for Raft state stored as blobs in CAS.
+#[allow(dead_code)]
 const HARD_STATE_KEY: &str = "raft-hard-state";
+#[allow(dead_code)]
 const CONF_STATE_KEY: &str = "raft-conf-state";
+#[allow(dead_code)]
 const SNAPSHOT_KEY: &str = "raft-snapshot";
 
 /// A Raft [`Storage`] implementation backed by our CAS [`LocalObjectStore`].
@@ -252,7 +255,7 @@ impl Storage for CasRaftStorage {
                     if let Ok(data) = self.object_store.get_blob(&hash) {
                         let entry = Entry {
                             index: idx,
-                            data: data.into(),
+                            data,
                             ..Default::default()
                         };
                         let size = entry.data.len() as u64;
@@ -353,7 +356,7 @@ impl Storage for CasRaftStorage {
         };
 
         Ok(Snapshot {
-            data: data.into(),
+            data,
             metadata: Some(metadata),
         })
     }
@@ -411,7 +414,7 @@ mod tests {
         let entry = Entry {
             index: 1,
             term: 1,
-            data: vec![1, 2, 3].into(),
+            data: vec![1, 2, 3],
             ..Default::default()
         };
 
@@ -438,7 +441,7 @@ mod tests {
         let entry = Entry {
             index: 1,
             term,
-            data: data.into(),
+            data,
             ..Default::default()
         };
 
@@ -455,7 +458,7 @@ mod tests {
             let entry = Entry {
                 index: i,
                 term: 1,
-                data: format!("entry-{i}").into_bytes().into(),
+                data: format!("entry-{i}").into_bytes(),
                 ..Default::default()
             };
             storage.append_entry(&entry).unwrap();

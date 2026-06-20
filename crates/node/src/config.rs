@@ -29,6 +29,7 @@ pub struct NodeConfig {
 
     /// Bootstrap peers (multiaddrs).
     #[serde(default)]
+    #[allow(dead_code)]
     pub bootstrap_peers: Vec<String>,
 
     /// Node capabilities.

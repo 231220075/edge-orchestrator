@@ -6,7 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use eo_core::types::{NodeId, Role, RoutingStrategy, ScheduledTask, TaskId};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// The task scheduler routes pending tasks to execution nodes.
 #[derive(Default)]

@@ -9,6 +9,7 @@ use eo_core::types::{ExecutionResult, ResourceLimits};
 
 /// A sandbox that executes native binaries in Linux namespaces.
 pub struct LinuxContainerSandbox {
+    #[allow(dead_code)]
     limits: ResourceLimits,
 }
 

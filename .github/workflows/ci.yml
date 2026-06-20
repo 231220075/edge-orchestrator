@@ -42,7 +42,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt update -qq
-          sudo apt install -y -qq libssl-dev pkg-config
+          sudo apt install -y -qq libssl-dev pkg-config protobuf-compiler
+
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
       - name: Check formatting (fmt)
         run: cargo fmt --all -- --check

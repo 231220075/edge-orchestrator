@@ -14,7 +14,7 @@ use tracing::{debug, info};
 use crate::proposal::{ApplyResult, Proposal};
 
 /// The replicated cluster state maintained by the Raft state machine.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClusterState {
     /// Registry of all known nodes.
     pub nodes: HashMap<NodeId, NodeDescriptor>,
@@ -30,18 +30,6 @@ pub struct ClusterState {
 
     /// The last applied Raft log index.
     pub last_applied_index: u64,
-}
-
-impl Default for ClusterState {
-    fn default() -> Self {
-        Self {
-            nodes: HashMap::new(),
-            role_assignments: HashMap::new(),
-            task_queue: VecDeque::new(),
-            completed_tasks: HashMap::new(),
-            last_applied_index: 0,
-        }
-    }
 }
 
 impl ClusterState {

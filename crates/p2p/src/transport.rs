@@ -26,11 +26,9 @@ pub fn build_transport(keypair: &identity::Keypair) -> Boxed<(PeerId, StreamMuxe
         .expect("failed to build noise config from valid keypair");
 
     // TCP transport using tokio
-    let tcp = TcpTransport::default()
+    TcpTransport::default()
         .upgrade(libp2p::core::upgrade::Version::V1)
         .authenticate(noise_config)
         .multiplex(yamux::Config::default())
-        .boxed();
-
-    tcp
+        .boxed()
 }

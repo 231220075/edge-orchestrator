@@ -21,6 +21,7 @@ pub struct Node {
     /// Handle for interacting with the running P2P swarm.
     pub swarm: SwarmHandle,
     /// Content-addressed object store.
+    #[allow(dead_code)]
     pub object_store: Arc<storage::LocalObjectStore>,
     /// IPC server handle (None if IPC is disabled).
     pub ipc_handle: Option<eo_ipc::server::IpcServerHandle>,

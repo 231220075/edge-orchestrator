@@ -3,8 +3,6 @@
 //! Proposals are the operations that can be submitted to the Raft cluster
 //! for replication and commitment.
 
-use std::collections::HashMap;
-
 use eo_core::types::{NodeDescriptor, NodeId, Role, ScheduledTask, TaskId};
 use serde::{Deserialize, Serialize};
 

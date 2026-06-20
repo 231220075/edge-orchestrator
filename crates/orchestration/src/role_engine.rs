@@ -3,13 +3,11 @@
 //! Manages role assignments across the cluster: applies topology specs,
 //! monitors node health, and triggers failover reassignments.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use eo_core::error::Result;
-use eo_core::types::{Capabilities, NodeDescriptor, NodeId, Role, RuntimeKind};
+use eo_core::types::{Capabilities, NodeDescriptor, NodeId, Role};
 use eo_raft::Proposal;
 use serde::Deserialize;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -169,7 +167,7 @@ mod tests {
             let mut engine = RoleOrchestrationEngine::new(tx);
 
             let exec_id = uuid::Uuid::parse_str("660e8400-e29b-41d4-a716-446655440000").unwrap();
-            let backup_id = uuid::Uuid::parse_str("770e8400-e29b-41d4-a716-446655440000").unwrap();
+            let _backup_id = uuid::Uuid::parse_str("770e8400-e29b-41d4-a716-446655440000").unwrap();
 
             // Register two nodes: executor and backup
             engine.register_node(make_descriptor(
