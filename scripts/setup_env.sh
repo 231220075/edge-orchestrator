@@ -386,7 +386,7 @@ run_python_setup() {
             warn "Creating virtualenv..."
             python3 -m venv "$VENV_DIR"
             source "$VENV_DIR/bin/activate"
-            pip install -e "$EO_AGENT_DIR[dev]" -q
+            pip install "$EO_AGENT_DIR[dev]" -q
             deactivate
             ok "eo-agent installed into venv"
         fi
@@ -396,7 +396,9 @@ run_python_setup() {
     if "$VENV_DIR/bin/python" -c "import eo_agent" 2>/dev/null; then
         ok "eo_agent module importable"
     else
-        warn "eo_agent not importable — run: $VENV_DIR/bin/pip install -e $EO_AGENT_DIR[dev]"
+        warn "eo_agent not importable — run: $VENV_DIR/bin/pip install $EO_AGENT_DIR[dev]"
+        info "Note: Python 3.14+ requires non-editable install (pip install, not pip install -e)"
+        info "  because .pth files starting with '_' are skipped for security."
     fi
 }
 

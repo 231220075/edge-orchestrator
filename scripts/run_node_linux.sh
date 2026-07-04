@@ -36,13 +36,22 @@ NETWORK_STATE="$REPO_DIR/.eo_network"
 BOOTSTRAP_FILE="$REPO_DIR/.eo_bootstrap"
 mkdir -p "$LOG_DIR"
 
+# ── Session isolation ─────────────────────────────────────────────────────
+SESSION_ID="${EO_SESSION_ID:-$(date +%Y%m%d_%H%M%S)_$$}"
+SESSION_DIR="/tmp/eo_session_${SESSION_ID}"
+mkdir -p "$SESSION_DIR"
+export SESSION_ID
+
 export EO_HOME="${EO_HOME:-$HOME/.eo_storage}"
-export EO_IPC_SOCKET="${EO_IPC_SOCKET:-/tmp/eo_control.sock}"
 export RUST_LOG="${RUST_LOG:-info}"
 CONFIG_FILE="$REPO_DIR/configs/linux-node.yaml"
 STORE_DIR="$EO_HOME"
+VENV_DIR="$REPO_DIR/eo-agent/.venv"
 TS=$(date +%Y%m%d_%H%M%S)
 NODE_LOG="$LOG_DIR/node_linux_$TS.log"
+
+# Session-scoped IPC socket
+export EO_IPC_SOCKET="${EO_IPC_SOCKET:-/tmp/eo_control_${SESSION_ID}.sock}"
 
 # ── Pre-flight ───────────────────────────────────────────────────────────────
 preflight() {
@@ -241,12 +250,13 @@ launch_node() {
     echo "  Starting node (Ctrl+C to stop)..."
     echo ""
 
-    cleanup() {
+    cleanup_session() {
         echo ""; info "Shutting down Linux node..."
         [ -S "$EO_IPC_SOCKET" ] && rm -f "$EO_IPC_SOCKET"
+        [ -d "$SESSION_DIR" ] && rm -rf "$SESSION_DIR"
         ok "Goodbye."
     }
-    trap cleanup EXIT INT TERM
+    trap cleanup_session EXIT INT TERM
 
     exec "$REPO_DIR/target/release/node" \
         --config "$CONFIG_FILE" \
@@ -262,6 +272,7 @@ echo ""
 echo -e "${CYAN}  ╔══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}  ║   Edge-Cloud Orchestrator — Linux Execution Node             ║${NC}"
 echo -e "${CYAN}  ║   $(uname -s) $(uname -m) — $(date)                 ║${NC}"
+echo -e "${CYAN}  ║   Session: $SESSION_ID                                ║${NC}"
 echo -e "${CYAN}  ╚══════════════════════════════════════════════════════════════╝${NC}"
 
 preflight

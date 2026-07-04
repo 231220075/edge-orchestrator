@@ -18,6 +18,11 @@ class AgentState(TypedDict, total=False):
     the fields it is responsible for. LangGraph merges partial updates.
     """
 
+    # ── Routing ───────────────────────────────────────────────────
+    task_type: str
+    """Classified task type: ``"deploy"`` | ``"question"`` | ``"tool"``.
+    Set by the router node and used for conditional graph routing."""
+
     # ── Conversation ──────────────────────────────────────────────
     messages: Annotated[list[BaseMessage], add_messages]
     """Conversation history. The add_messages reducer appends new entries."""
@@ -42,6 +47,9 @@ class AgentState(TypedDict, total=False):
 
     task_id: Optional[str]
     """UUID of the scheduled task."""
+
+    result_hash: Optional[str]
+    """SHA-256 hash of the ExecutionResult (set by inline executor)."""
 
     # ── Evaluator output ──────────────────────────────────────────
     exit_code: Optional[int]

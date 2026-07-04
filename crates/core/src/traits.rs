@@ -101,8 +101,15 @@ pub trait ObjectStore: Send + Sync {
     /// # Arguments
     /// * `tree_hash` — The hash of the tree this commit points to.
     /// * `parent_hashes` — Parent commit hashes (empty for initial commit).
+    /// * `author` — Author identifier for this commit.
     /// * `message` — Human-readable description of the change.
-    fn commit(&self, tree_hash: Hash, parent_hashes: Vec<Hash>, message: &str) -> Result<Hash>;
+    fn commit(
+        &self,
+        tree_hash: Hash,
+        parent_hashes: Vec<Hash>,
+        author: &str,
+        message: &str,
+    ) -> Result<Hash>;
 
     /// Check whether an object with the given hash exists in the store.
     fn exists(&self, hash: &Hash) -> bool;

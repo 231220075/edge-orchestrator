@@ -3,15 +3,16 @@
 //! Dispatches incoming method calls to the appropriate Rust subsystem
 //! (CAS storage, Raft proposal channel, cluster state).
 
+use std::process;
 use std::sync::Arc;
 
-use eo_core::types::{ResourceLimits, RoutingStrategy, ScheduledTask};
+use eo_core::types::{ExecutionResult, ResourceLimits, RoutingStrategy, ScheduledTask};
 use eo_raft::Proposal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use storage::LocalObjectStore;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 // ── JSON-RPC wire types ────────────────────────────────────────────────
 
@@ -85,6 +86,13 @@ pub struct JsonRpcHandler {
 
     /// Total tasks completed (monotonically increasing counter).
     pub tasks_completed: std::sync::atomic::AtomicU64,
+
+    /// This node's own descriptor, for inclusion in topology responses.
+    pub self_descriptor: Option<eo_core::types::NodeDescriptor>,
+
+    /// Whether to execute tasks inline (single-node mode).
+    /// When true, submitted code is executed immediately after storage.
+    pub inline_execution: bool,
 }
 
 impl JsonRpcHandler {
@@ -97,7 +105,14 @@ impl JsonRpcHandler {
             raft_proposal_tx,
             object_store,
             tasks_completed: std::sync::atomic::AtomicU64::new(0),
+            self_descriptor: None,
+            inline_execution: true, // default: execute inline for single-node
         }
+    }
+
+    /// Set this node's descriptor (called after bootstrap completes).
+    pub fn set_self_descriptor(&mut self, desc: eo_core::types::NodeDescriptor) {
+        self.self_descriptor = Some(desc);
     }
 
     /// Dispatch a JSON-RPC request to the appropriate method handler.
@@ -133,23 +148,53 @@ impl JsonRpcHandler {
     // ── Method implementations ────────────────────────────────────────
 
     async fn get_cluster_topology(&self) -> Result<Value, JsonRpcErrorPayload> {
-        // Return a static topology for now — in production this would
-        // read from ClusterState (which is held by the Raft state machine).
+        // Build node list from self descriptor (multi-node discovery
+        // reads from ClusterState in the Raft state machine — this is
+        // the single-node fallback that prevents returning empty lists).
+        let mut nodes = Vec::new();
+        let mut role_assignments = serde_json::Map::new();
+
+        if let Some(ref desc) = self.self_descriptor {
+            nodes.push(serde_json::json!({
+                "node_id": desc.node_id.to_string(),
+                "node_type": match desc.node_type {
+                    eo_core::types::NodeType::Heavy => "Heavy",
+                    eo_core::types::NodeType::Light => "Light",
+                },
+                "os": format!("{:?}", desc.os),
+                "capabilities": {
+                    "storage": desc.capabilities.storage,
+                    "gpu_acceleration": desc.capabilities.gpu_acceleration,
+                    "runtimes": desc.capabilities.runtimes.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>(),
+                    "max_memory_mb": desc.capabilities.max_memory_mb,
+                    "cpu_cores": desc.capabilities.cpu_cores,
+                },
+                "advertised_addresses": desc.advertised_addresses.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                "current_assigned_roles": desc.current_assigned_roles.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                "started_at": desc.started_at.to_rfc3339(),
+            }));
+
+            let roles: Vec<String> = desc.current_assigned_roles.iter().map(|r| r.to_string()).collect();
+            role_assignments.insert(desc.node_id.to_string(), serde_json::Value::Array(
+                roles.iter().map(|r| serde_json::Value::String(r.clone())).collect()
+            ));
+        }
+
         let topology = serde_json::json!({
-            "nodes": [],
-            "role_assignments": {},
+            "nodes": nodes,
+            "role_assignments": role_assignments,
             "tasks_pending": 0,
             "tasks_completed": self.tasks_completed.load(std::sync::atomic::Ordering::Relaxed),
         });
 
-        debug!("get_cluster_topology: returned topology");
+        debug!("get_cluster_topology: returned topology with {} node(s)", nodes.len());
         Ok(topology)
     }
 
     async fn submit_to_cas_and_raft(&self, params: Value) -> Result<Value, JsonRpcErrorPayload> {
         let SubmitParams {
             code,
-            code_language: _code_language,
+            code_language,
             required_runtime,
             routing,
             timeout_ms,
@@ -226,10 +271,186 @@ impl JsonRpcHandler {
 
         debug!("submit_to_cas_and_raft: code_hash={code_hash}, task_id={task_id}");
 
-        Ok(serde_json::json!({
+        // ── Inline execution (single-node mode) ──────────────────────
+        // When running as a single node, execute the task immediately
+        // so results are available for the agent's evaluation step.
+        let mut response = serde_json::json!({
             "code_hash": code_hash,
             "task_id": task_id.to_string(),
-        }))
+        });
+
+        if self.inline_execution {
+            let start = std::time::Instant::now();
+            match self.execute_inline(&code_bytes, &code_language, timeout_ms) {
+                Ok(exec_result) => {
+                    let elapsed = start.elapsed();
+                    let exec_result = ExecutionResult {
+                        exit_code: exec_result.exit_code,
+                        stdout: exec_result.stdout,
+                        stderr: exec_result.stderr,
+                        execution_time_ms: elapsed.as_millis() as u64,
+                        peak_memory_bytes: exec_result.peak_memory_bytes,
+                        result_hash: None,
+                    };
+
+                    // Serialize and store result in CAS
+                    match serde_json::to_vec(&exec_result) {
+                        Ok(result_json) => {
+                            let result_hash = self.object_store.put_blob(&result_json)
+                                .map_err(|e| json_rpc_error(-32002, format!("Result storage error: {e}")))?;
+
+                            self.tasks_completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                            // Propose completion to Raft
+                            let _ = self.raft_proposal_tx
+                                .send(Proposal::CompleteTask {
+                                    task_id,
+                                    result_hash: result_hash.clone(),
+                                })
+                                .await;
+
+                            response["result_hash"] = serde_json::Value::String(result_hash);
+                            info!(
+                                "Task {task_id} executed inline: exit_code={}, time={elapsed:?}",
+                                exec_result.exit_code
+                            );
+                        }
+                        Err(e) => {
+                            warn!("Failed to serialize execution result: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Inline execution failed for task {task_id}: {e}");
+                    // Store the error as a result so the agent can see it
+                    let error_result = ExecutionResult {
+                        exit_code: -1,
+                        stdout: vec![],
+                        stderr: e.as_bytes().to_vec(),
+                        execution_time_ms: 0,
+                        peak_memory_bytes: 0,
+                        result_hash: None,
+                    };
+                    if let Ok(result_json) = serde_json::to_vec(&error_result) {
+                        if let Ok(result_hash) = self.object_store.put_blob(&result_json) {
+                            response["result_hash"] = serde_json::Value::String(result_hash);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(response)
+    }
+
+    /// Execute code inline using the appropriate runtime.
+    ///
+    /// For Python code, spawns ``python3 -c <code>`` as a subprocess.
+    /// For Wasm, uses the Wasmtime sandbox.
+    /// For other languages, attempts to detect and execute appropriately.
+    fn execute_inline(
+        &self,
+        code_bytes: &[u8],
+        code_language: &str,
+        _timeout_ms: u64,
+    ) -> Result<InlineResult, String> {
+        match code_language.to_lowercase().as_str() {
+            "python" | "py" => {
+                // Execute Python code via subprocess
+                let code_str = String::from_utf8_lossy(code_bytes).to_string();
+
+                // Try python3 first, then python
+                let python = if process::Command::new("python3")
+                    .arg("--version")
+                    .output()
+                    .is_ok()
+                {
+                    "python3"
+                } else {
+                    "python"
+                };
+
+                let output = process::Command::new(python)
+                    .arg("-c")
+                    .arg(&code_str)
+                    .stdout(process::Stdio::piped())
+                    .stderr(process::Stdio::piped())
+                    .output()
+                    .map_err(|e| format!("Failed to spawn {python}: {e}"))?;
+
+                Ok(InlineResult {
+                    exit_code: output.status.code().unwrap_or(-1),
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    peak_memory_bytes: 0, // not tracked for subprocess
+                })
+            }
+            "wasm" | "wat" => {
+                // For Wasm: try to execute via WasmtimeSandbox if available
+                // Fall back to reporting that container execution is needed
+                #[cfg(target_arch = "wasm32")]
+                {
+                    Err("Wasm execution not supported in wasm32 target".into())
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    // Try to compile and run via wasmtime
+                    use eo_core::traits::Sandbox;
+                    let sandbox = sandbox::wasm::WasmtimeSandbox::new()
+                        .map_err(|e| format!("Failed to create Wasmtime sandbox: {e}"))?;
+                    match sandbox.execute_code(code_bytes.to_vec()) {
+                        Ok(result) => Ok(InlineResult {
+                            exit_code: result.exit_code,
+                            stdout: result.stdout,
+                            stderr: result.stderr,
+                            peak_memory_bytes: result.peak_memory_bytes,
+                        }),
+                        Err(e) => {
+                            // If Wasm execution fails (e.g. invalid bytecode), report it
+                            let msg = format!("Wasm execution failed: {e}");
+                            warn!("{msg}");
+                            Err(msg)
+                        }
+                    }
+                }
+            }
+            "posix" | "shell" | "bash" => {
+                // Execute shell code
+                let code_str = String::from_utf8_lossy(code_bytes).to_string();
+                let output = process::Command::new("bash")
+                    .arg("-c")
+                    .arg(&code_str)
+                    .stdout(process::Stdio::piped())
+                    .stderr(process::Stdio::piped())
+                    .output()
+                    .map_err(|e| format!("Failed to spawn bash: {e}"))?;
+
+                Ok(InlineResult {
+                    exit_code: output.status.code().unwrap_or(-1),
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    peak_memory_bytes: 0,
+                })
+            }
+            _ => {
+                // Unknown language — try as Python
+                let code_str = String::from_utf8_lossy(code_bytes).to_string();
+                let output = process::Command::new("python3")
+                    .arg("-c")
+                    .arg(&code_str)
+                    .stdout(process::Stdio::piped())
+                    .stderr(process::Stdio::piped())
+                    .output()
+                    .map_err(|e| format!("Failed to spawn python3: {e}"))?;
+
+                Ok(InlineResult {
+                    exit_code: output.status.code().unwrap_or(-1),
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    peak_memory_bytes: 0,
+                })
+            }
+        }
     }
 
     async fn fetch_execution_result(&self, params: Value) -> Result<Value, JsonRpcErrorPayload> {
@@ -260,6 +481,15 @@ impl JsonRpcHandler {
     }
 }
 
+// ── Inline execution result (before wrapping in CAS types) ───────────
+
+struct InlineResult {
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    peak_memory_bytes: u64,
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────
 
 fn json_rpc_error(code: i32, message: String) -> JsonRpcErrorPayload {
@@ -276,7 +506,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = Arc::new(LocalObjectStore::new(dir.path().to_path_buf()).unwrap());
         let (tx, rx) = mpsc::channel(16);
-        let handler = JsonRpcHandler::new(tx, store);
+        let mut handler = JsonRpcHandler::new(tx, store);
+        handler.inline_execution = false; // disable for tests
         (handler, dir, rx)
     }
 
@@ -416,5 +647,45 @@ mod tests {
         let resp = handler.handle(req).await;
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32601); // Method not found
+    }
+
+    #[tokio::test]
+    async fn inline_execution_python_code_succeeds() {
+        let (mut handler, _dir, mut rx) = make_handler();
+        handler.inline_execution = true;
+        // Drain the channel setup
+        while rx.try_recv().is_ok() {}
+
+        let code = b"print('hello from sandbox')\n";
+        use base64::Engine;
+        let code_b64 = base64::engine::general_purpose::STANDARD.encode(code);
+
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "submit_to_cas_and_raft".into(),
+            params: serde_json::json!({
+                "code": code_b64,
+                "code_language": "python",
+                "required_runtime": "Wasm",
+                "routing": "AnyExecutor",
+            }),
+            id: Value::Number(6.into()),
+        };
+
+        let resp = handler.handle(req).await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let result = resp.result.unwrap();
+
+        // Should have result_hash from inline execution
+        let result_hash = result["result_hash"].as_str().unwrap();
+        assert!(!result_hash.is_empty());
+
+        // Fetch and verify the result
+        let data = handler.object_store.get_blob(&result_hash.to_string()).unwrap();
+        let exec_result: eo_core::types::ExecutionResult =
+            serde_json::from_slice(&data).unwrap();
+        assert_eq!(exec_result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&exec_result.stdout);
+        assert!(stdout.contains("hello from sandbox"), "got: {stdout}");
     }
 }

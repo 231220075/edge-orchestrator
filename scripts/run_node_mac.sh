@@ -18,8 +18,8 @@
 #
 # Environment variables:
 #   DEEPSEEK_API_KEY  — LLM API key (also reads OPENAI_API_KEY / ANTHROPIC_API_KEY)
-#   EO_LLM_MODEL      — Model name (default: gpt-4o)
-#   EO_LLM_BASE_URL   — Custom API base URL (for DeepSeek / Ollama / local models)
+#   EO_LLM_MODEL      — Model name override (default: from active provider config)
+#   EO_LLM_BASE_URL   — Custom API base URL (for local / custom providers)
 #   EO_HOME           — Storage root (default: ~/.eo_storage)
 #   EO_IPC_SOCKET     — UDS path (default: /tmp/eo_control.sock)
 #   RUST_LOG          — Tracing level (default: info)
@@ -41,16 +41,24 @@ NETWORK_STATE="$REPO_DIR/.eo_network"
 BOOTSTRAP_FILE="$REPO_DIR/.eo_bootstrap"
 mkdir -p "$LOG_DIR"
 
+# ── Session isolation ─────────────────────────────────────────────────────
+SESSION_ID="${EO_SESSION_ID:-$(date +%Y%m%d_%H%M%S)_$$}"
+SESSION_DIR="/tmp/eo_session_${SESSION_ID}"
+mkdir -p "$SESSION_DIR"
+export SESSION_ID
+
 export EO_HOME="${EO_HOME:-$HOME/.eo_storage}"
-export EO_IPC_SOCKET="${EO_IPC_SOCKET:-/tmp/eo_control.sock}"
 export RUST_LOG="${RUST_LOG:-info}"
-export EO_LLM_MODEL="${EO_LLM_MODEL:-gpt-4o}"
+export EO_LLM_MODEL="${EO_LLM_MODEL:-}"
 CONFIG_FILE="$REPO_DIR/configs/mac-node.yaml"
 STORE_DIR="$EO_HOME"
 VENV_DIR="$REPO_DIR/eo-agent/.venv"
 TS=$(date +%Y%m%d_%H%M%S)
 NODE_LOG="$LOG_DIR/node_mac_$TS.log"
 AGENT_LOG="$LOG_DIR/agent_mac_$TS.log"
+
+# Session-scoped IPC socket (avoids conflicts with concurrent sessions)
+export EO_IPC_SOCKET="${EO_IPC_SOCKET:-/tmp/eo_control_${SESSION_ID}.sock}"
 
 # ── Parse flags ──────────────────────────────────────────────────────────────
 AGENT_ONLY=false; NODE_ONLY=false; MOCK_MODE=false
@@ -63,6 +71,49 @@ for arg in "$@"; do
     esac
 done
 $AGENT_ONLY && $NODE_ONLY && { echo "ERROR: --agent-only and --node-only are mutually exclusive" >&2; exit 2; }
+
+# ── Venv management ───────────────────────────────────────────────────────────
+ensure_venv() {
+    # Ensure the eo-agent virtualenv exists and has all deps installed.
+    # Creates it from scratch if missing or broken.
+    local eo_agent_dir="$REPO_DIR/eo-agent"
+    local venv_dir="$eo_agent_dir/.venv"
+    local needs_install=false
+
+    if [ ! -f "$venv_dir/bin/python" ]; then
+        info "Creating Python virtualenv for eo-agent..."
+        python3 -m venv "$venv_dir"
+        needs_install=true
+    fi
+
+    # Health check — is eo_agent importable?
+    if ! "$venv_dir/bin/python" -c "import eo_agent" 2>/dev/null; then
+        warn "eo_agent not importable — reinstalling..."
+        needs_install=true
+    fi
+
+    if $needs_install; then
+        info "Installing eo-agent + dependencies (one-time, ~10-30s)..."
+        "$venv_dir/bin/pip" install "$eo_agent_dir/" -q 2>&1 | tail -3
+        if "$venv_dir/bin/python" -c "import eo_agent" 2>/dev/null; then
+            ok "eo-agent installed into venv"
+        else
+            error "Failed to install eo-agent — check error output above"
+            return 1
+        fi
+    else
+        ok "eo-agent venv: ready"
+    fi
+
+    # Verify key deps
+    for pkg in langchain_core langchain_openai yaml; do
+        if ! "$venv_dir/bin/python" -c "import $pkg" 2>/dev/null; then
+            warn "Missing dependency: $pkg — reinstalling..."
+            "$venv_dir/bin/pip" install "$eo_agent_dir/" -q 2>&1
+            break
+        fi
+    done
+}
 
 # ── Pre-flight: check setup ──────────────────────────────────────────────────
 preflight() {
@@ -100,38 +151,83 @@ preflight() {
 
 # ── LLM Key check ────────────────────────────────────────────────────────────
 check_llm_key() {
-    # Merge common key aliases
-    if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
-        [ -n "${OPENAI_API_KEY:-}" ]    && export DEEPSEEK_API_KEY="$OPENAI_API_KEY"
-        [ -n "${ANTHROPIC_API_KEY:-}" ] && export DEEPSEEK_API_KEY="$ANTHROPIC_API_KEY"
-        [ -n "${DEEPSEEK_API_KEY:-}" ]  && info "Using API key from existing env var"
+    # Load keys from secure keyring first (macOS Keychain or encrypted file)
+    # and auto-generate LLM provider config if needed.
+    if [ -f "$VENV_DIR/bin/python" ]; then
+        "$VENV_DIR/bin/python" -c "
+import sys; sys.path.insert(0, '$REPO_DIR/eo-agent/src')
+from eo_agent.keyring import get_keyring
+from eo_agent.llm_config import get_llm_config
+kr = get_keyring()
+kr.load_to_env()
+cfg = get_llm_config()
+# Auto-generate from keyring if no config exists
+if not cfg.get_active():
+    cfg.auto_generate()
+" 2>/dev/null || true
     fi
 
-    if [ -z "${DEEPSEEK_API_KEY:-}" ] && [ "$MOCK_MODE" = false ]; then
+    # Check if we have a working LLM setup
+    local has_key=false
+    [ -n "${OPENAI_API_KEY:-}" ]    && has_key=true
+    [ -n "${DEEPSEEK_API_KEY:-}" ]  && has_key=true
+    [ -n "${ANTHROPIC_API_KEY:-}" ] && has_key=true
+
+    if ! $has_key; then
+        # Check if config has a provider with "none" auth (local LLM)
+        local no_auth
+        no_auth=$("$VENV_DIR/bin/python" -c "
+from eo_agent.llm_config import get_llm_config
+cfg = get_llm_config()
+active = cfg.get_active()
+if active and active.get('api_key_source') == 'none':
+    print('true')
+else:
+    print('false')
+" 2>/dev/null) || no_auth="false"
+
+        if [ "$no_auth" = "true" ]; then
+            ok "LLM: local (no auth required)"
+            return
+        fi
+    fi
+
+    if ! $has_key && [ "$MOCK_MODE" = false ]; then
         echo ""
         echo -e "  ${YELLOW}┌─────────────────────────────────────────────────────────┐${NC}"
-        echo -e "  ${YELLOW}│  No DEEPSEEK_API_KEY / OPENAI_API_KEY found.              │${NC}"
-        echo -e "  ${YELLOW}│  The agent will run in MOCK mode (deterministic responses). │${NC}"
+        echo -e "  ${YELLOW}│  No LLM provider configured. The agent will run in        │${NC}"
+        echo -e "  ${YELLOW}│  MOCK mode (deterministic responses).                    │${NC}"
         echo -e "  ${YELLOW}│                                                         │${NC}"
-        echo -e "  ${YELLOW}│  Set one of:                                            │${NC}"
-        echo -e "  ${YELLOW}│    export DEEPSEEK_API_KEY=\"sk-...\"                     │${NC}"
-        echo -e "  ${YELLOW}│    export OPENAI_API_KEY=\"sk-...\"                       │${NC}"
-        echo -e "  ${YELLOW}│    export ANTHROPIC_API_KEY=\"sk-ant-...\"                │${NC}"
+        echo -e "  ${YELLOW}│  Set up a provider (recommended):                        │${NC}"
+        echo -e "  ${YELLOW}│    eo-agent --llm-add deepseek https://api.deepseek.com/v1 deepseek-chat │${NC}"
+        echo -e "  ${YELLOW}│    eo-agent --set-key deepseek sk-...                    │${NC}"
         echo -e "  ${YELLOW}│                                                         │${NC}"
-        echo -e "  ${YELLOW}│  For custom endpoints (DeepSeek/Ollama/local):            │${NC}"
-        echo -e "  ${YELLOW}│    export EO_LLM_BASE_URL=\"https://api.deepseek.com/v1\"  │${NC}"
-        echo -e "  ${YELLOW}│    export EO_LLM_MODEL=\"deepseek-chat\"                   │${NC}"
+        echo -e "  ${YELLOW}│  Check status:  eo-agent --llm-status                    │${NC}"
+        echo -e "  ${YELLOW}│  List providers: eo-agent --llm-list                      │${NC}"
         echo -e "  ${YELLOW}└─────────────────────────────────────────────────────────┘${NC}"
         echo ""
         export EO_MOCK_MODE=true
     fi
 
     # Show what's configured
-    if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-        ok "LLM Key: [set] ($(echo "$DEEPSEEK_API_KEY" | wc -c | xargs) chars)"
+    if $has_key; then
+        ok "LLM Key: [set]"
     fi
-    [ -n "${EO_LLM_BASE_URL:-}" ] && ok "LLM Base URL: $EO_LLM_BASE_URL"
     ok "LLM Model: $EO_LLM_MODEL"
+
+    # Show active provider info from config
+    if [ -f "$VENV_DIR/bin/python" ]; then
+        local active_info
+        active_info=$("$VENV_DIR/bin/python" -c "
+from eo_agent.llm_config import get_llm_config
+cfg = get_llm_config()
+name = cfg.get_active_name()
+active = cfg.get_active()
+if name and active:
+    print(f'{name} | {active.get(\"model\",\"?\")} | {active.get(\"base_url\",\"?\")}')
+" 2>/dev/null) || true
+        [ -n "$active_info" ] && ok "LLM Provider: $active_info"
+    fi
 }
 
 # ── Firewall config for node binary ───────────────────────────────────────────
@@ -187,7 +283,8 @@ launch_node() {
 
     NODE_PID=$!
     echo "  PID: $NODE_PID"
-    echo "$NODE_PID" > /tmp/eo_node_mac.pid
+    echo "$NODE_PID" > "$SESSION_DIR/node.pid"
+    echo "$(date)" > "$SESSION_DIR/started_at"
 
     # Wait for IPC socket (max 15s)
     echo -n "  Waiting for IPC socket..."
@@ -260,10 +357,8 @@ launch_agent() {
     echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
     echo ""
 
-    if [ ! -f "$VENV_DIR/bin/python" ]; then
-        error "Virtualenv not found at $VENV_DIR. Run: ./scripts/setup_env.sh"
-        exit 1
-    fi
+    # Ensure venv is ready (auto-create if needed)
+    ensure_venv || exit 1
 
     if [ "$MOCK_MODE" = true ]; then
         export EO_MOCK_MODE=true
@@ -273,41 +368,61 @@ launch_agent() {
         echo "  Mode: PRODUCTION  |  Socket: $EO_IPC_SOCKET"
     fi
 
-    echo "  LLM:   ${EO_LLM_MODEL}  |  Key: ${DEEPSEEK_API_KEY:+[set]}${DEEPSEEK_API_KEY:-[mock]}"
+    # Show key status
+    local key_info="[mock]"
+    if [ -n "${OPENAI_API_KEY:-}" ]; then
+        key_info="[openai]"
+    elif [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+        key_info="[deepseek]"
+    elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        key_info="[anthropic]"
+    fi
+    if [ -n "${EO_LLM_MODEL:-}" ]; then
+        echo "  LLM:   ${EO_LLM_MODEL}  |  Key: ${key_info}"
+    else
+        echo "  LLM:   (from provider config)  |  Key: ${key_info}"
+    fi
     [ -n "${EO_LLM_BASE_URL:-}" ] && echo "  URL:   $EO_LLM_BASE_URL"
     echo "  Log:   $AGENT_LOG"
     echo ""
 
     cd "$REPO_DIR"
     source "$VENV_DIR/bin/activate"
-    "$VENV_DIR/bin/eo-agent" --interactive --socket "$EO_IPC_SOCKET" 2>&1 | tee "$AGENT_LOG"
+    # Add src to PYTHONPATH so code edits are picked up without reinstalling
+    PYTHONPATH="$REPO_DIR/eo-agent/src:${PYTHONPATH:-}" \
+        "$VENV_DIR/bin/eo-agent" --interactive --socket "$EO_IPC_SOCKET" 2>&1 | tee "$AGENT_LOG"
 }
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
-cleanup_node() {
-    if [ -f /tmp/eo_node_mac.pid ]; then
-        NPID=$(cat /tmp/eo_node_mac.pid)
+cleanup_session() {
+    # Stop Rust node
+    if [ -f "$SESSION_DIR/node.pid" ]; then
+        NPID=$(cat "$SESSION_DIR/node.pid")
         if kill -0 "$NPID" 2>/dev/null; then
             echo ""; info "Stopping node (PID $NPID)..."
             kill "$NPID" 2>/dev/null || true
             sleep 1; kill -9 "$NPID" 2>/dev/null || true
             ok "Node stopped"
         fi
-        rm -f /tmp/eo_node_mac.pid
     fi
+    # Remove session-scoped IPC socket
     [ -S "$EO_IPC_SOCKET" ] && rm -f "$EO_IPC_SOCKET"
+    # Remove session directory
+    [ -d "$SESSION_DIR" ] && rm -rf "$SESSION_DIR"
     echo "Goodbye."
 }
-trap cleanup_node EXIT INT TERM
+trap cleanup_session EXIT INT TERM
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}  ╔══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}  ║   Edge-Cloud Orchestrator — macOS ControlPlane               ║${NC}"
 echo -e "${CYAN}  ║   $(uname -s) $(uname -m) — $(date)                 ║${NC}"
+echo -e "${CYAN}  ║   Session: $SESSION_ID                                ║${NC}"
 echo -e "${CYAN}  ╚══════════════════════════════════════════════════════════════╝${NC}"
 
 preflight
+ensure_venv
 check_llm_key
 build_node
 configure_firewall

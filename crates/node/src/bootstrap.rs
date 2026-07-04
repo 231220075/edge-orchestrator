@@ -25,6 +25,13 @@ pub struct Node {
     pub object_store: Arc<storage::LocalObjectStore>,
     /// IPC server handle (None if IPC is disabled).
     pub ipc_handle: Option<eo_ipc::server::IpcServerHandle>,
+
+    /// Keep Raft transport channels alive. These channels connect the
+    /// Raft event loop to the P2P swarm. Dropping them closes the transport.
+    #[allow(dead_code)]
+    _raft_cmd_rx: tokio::sync::mpsc::Receiver<eo_raft::SwarmRaftCommand>,
+    #[allow(dead_code)]
+    _raft_msg_tx: tokio::sync::mpsc::Sender<eo_raft::RaftEnvelope>,
 }
 
 impl Node {
@@ -96,7 +103,7 @@ impl Node {
         let raft_peers = vec![raft_node_id]; // self is the only peer
 
         let _cas_storage = eo_raft::CasRaftStorage::new(Arc::clone(&object_store));
-        let (transport, _cmd_rx, _msg_tx) = eo_raft::create_raft_transport();
+        let (transport, raft_cmd_rx, raft_msg_tx) = eo_raft::create_raft_transport();
 
         let mut raft_node = eo_raft::RaftNode::new(raft_node_id, raft_peers.clone(), transport)
             .await
@@ -118,7 +125,8 @@ impl Node {
 
         // 7. Start IPC server (unless disabled)
         let ipc_handle = if let Some(socket_path) = ipc_socket_path {
-            let ipc_handler = eo_ipc::JsonRpcHandler::new(proposal_tx, Arc::clone(&object_store));
+            let mut ipc_handler = eo_ipc::JsonRpcHandler::new(proposal_tx, Arc::clone(&object_store));
+            ipc_handler.set_self_descriptor(descriptor.clone());
             let ipc_server = eo_ipc::IpcServer::new(socket_path.to_path_buf(), ipc_handler);
             let handle = ipc_server.start();
             info!("IPC server listening on {}", socket_path.display());
@@ -133,6 +141,8 @@ impl Node {
             swarm,
             object_store,
             ipc_handle,
+            _raft_cmd_rx: raft_cmd_rx,
+            _raft_msg_tx: raft_msg_tx,
         })
     }
 

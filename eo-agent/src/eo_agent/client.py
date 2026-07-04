@@ -108,7 +108,31 @@ class MockJsonRpcClient(RpcClient):
             code = params.get("code", "")
             code_hash = hashlib.sha256(code.encode()).hexdigest()[:16]
             task_id = str(uuid.uuid4())
-            return {"code_hash": code_hash, "task_id": task_id}
+            # Simulate inline execution: store a mock execution result
+            # and return its hash so the evaluator can find it
+            mock_result = {
+                "exit_code": 0,
+                "stdout": "SGVsbG8gZnJvbSB0aGUgc2FuZGJveCE=\n",  # "Hello from the sandbox!"
+                "stderr": "",
+                "execution_time_ms": 15,
+                "peak_memory_bytes": 1048576,
+            }
+            result_hash = hashlib.sha256(
+                json.dumps(mock_result).encode()
+            ).hexdigest()[:16]
+            # Store in mock responses so fetch_execution_result can find it
+            self.responses[result_hash] = mock_result
+            return {
+                "code_hash": code_hash,
+                "task_id": task_id,
+                "result_hash": result_hash,
+            }
+
+        if method == "fetch_execution_result":
+            # Look up by result_hash (stored during inline execution simulation)
+            result_hash = params.get("result_hash", "")
+            if result_hash and result_hash in self.responses:
+                return self.responses[result_hash]
 
         return self.responses.get(method, {})
 
@@ -172,13 +196,14 @@ class MockJsonRpcClient(RpcClient):
 # ── Factory ────────────────────────────────────────────────────────────
 
 
-# Default socket path — matches the Rust node's default.
-_SOCKET_PATH = os.environ.get(
-    "EO_IPC_SOCKET", "~/.edge-orchestrator/ipc.sock"
-)
+def _is_mock_mode() -> bool:
+    """Check mock mode at call time (allows tests to set env var after import)."""
+    return os.environ.get("EO_MOCK_MODE", "").lower() in ("1", "true", "yes")
 
-# Switch to mock mode via environment variable.
-_MOCK_MODE = os.environ.get("EO_MOCK_MODE", "").lower() in ("1", "true", "yes")
+
+def _default_socket_path() -> str:
+    """Return the default UDS socket path."""
+    return os.environ.get("EO_IPC_SOCKET", "~/.edge-orchestrator/ipc.sock")
 
 
 def get_client(socket_path: str | None = None) -> RpcClient:
@@ -190,8 +215,8 @@ def get_client(socket_path: str | None = None) -> RpcClient:
     Returns:
         An :class:`RpcClient` implementation.
     """
-    if _MOCK_MODE:
+    if _is_mock_mode():
         return MockJsonRpcClient()
 
-    path = socket_path or _SOCKET_PATH
+    path = socket_path or _default_socket_path()
     return JsonRpcClient(path)

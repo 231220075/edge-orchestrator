@@ -63,7 +63,7 @@ async def test_graph_retry_count_initialized():
     graph = build_graph()
 
     result = await graph.ainvoke(
-        {"messages": [HumanMessage(content="Test retry counting")], "retry_count": 0},
+        {"messages": [HumanMessage(content="Deploy retry counting test")], "retry_count": 0},
         {"configurable": {"thread_id": "test-3"}},
     )
 
