@@ -132,6 +132,7 @@ mod tests {
             resource_limits: ResourceLimits::default(),
             submitted_at: Utc::now(),
             pinned_node: None,
+            code_inline: None,
         }
     }
 

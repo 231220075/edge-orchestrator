@@ -47,6 +47,15 @@ pub enum Proposal {
         /// CAS hash of the execution result.
         result_hash: String,
     },
+
+    /// Assign a queued task to a specific executor (raft id) for execution.
+    /// The executor processes it and later submits CompleteTask.
+    AssignTask {
+        /// The task being assigned.
+        task_id: TaskId,
+        /// The raft id of the executor node.
+        executor_raft_id: u64,
+    },
 }
 
 impl Proposal {

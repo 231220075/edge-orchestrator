@@ -30,6 +30,18 @@ pub struct ClusterState {
 
     /// The last applied Raft log index.
     pub last_applied_index: u64,
+
+    /// Tasks currently assigned to an executor (not yet completed).
+    pub assigned_tasks: std::collections::HashMap<TaskId, AssignedTask>,
+}
+
+/// A task-to-executor assignment recorded in replicated state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssignedTask {
+    pub task_id: TaskId,
+    pub executor_raft_id: u64,
+    pub assigned_at_ms: u64,
+    pub reroute_count: u32,
 }
 
 impl ClusterState {
@@ -89,12 +101,42 @@ impl ClusterState {
                 ApplyResult::TaskSubmitted(task_id)
             }
 
+            Proposal::AssignTask {
+                task_id,
+                executor_raft_id,
+            } => {
+                let now = chrono::Utc::now().timestamp_millis() as u64;
+                let reroute_count = self
+                    .assigned_tasks
+                    .get(&task_id)
+                    .map(|a| a.reroute_count + 1)
+                    .unwrap_or(0);
+                self.assigned_tasks.insert(
+                    task_id,
+                    AssignedTask {
+                        task_id,
+                        executor_raft_id,
+                        assigned_at_ms: now,
+                        reroute_count,
+                    },
+                );
+                info!(
+                    "Task {} assigned to raft {} (reroute #{})",
+                    task_id, executor_raft_id, reroute_count
+                );
+                ApplyResult::Ok
+            }
+
             Proposal::CompleteTask {
                 task_id,
                 result_hash,
             } => {
+                // At-least-once: removed from queue and assignments only when
+                // completion is committed.
+                self.task_queue.retain(|t| t.task_id != task_id);
+                self.assigned_tasks.remove(&task_id);
                 self.completed_tasks.insert(task_id, result_hash);
-                debug!("Task completed: {}", task_id);
+                info!("Task completed: {}", task_id);
                 ApplyResult::TaskCompleted(task_id)
             }
         }
@@ -107,6 +149,7 @@ impl ClusterState {
             role_assignments: self.role_assignments.clone(),
             task_queue: self.task_queue.clone(),
             completed_tasks: self.completed_tasks.clone(),
+            assigned_tasks: self.assigned_tasks.clone(),
             last_applied_index: self.last_applied_index,
         }
     }
@@ -118,6 +161,7 @@ impl ClusterState {
             role_assignments: snapshot.role_assignments,
             task_queue: snapshot.task_queue,
             completed_tasks: snapshot.completed_tasks,
+            assigned_tasks: snapshot.assigned_tasks,
             last_applied_index: snapshot.last_applied_index,
         }
     }
@@ -130,6 +174,7 @@ pub struct ClusterSnapshot {
     pub role_assignments: HashMap<NodeId, Vec<Role>>,
     pub task_queue: VecDeque<ScheduledTask>,
     pub completed_tasks: HashMap<TaskId, Hash>,
+    pub assigned_tasks: HashMap<TaskId, AssignedTask>,
     pub last_applied_index: u64,
 }
 

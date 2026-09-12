@@ -39,3 +39,4 @@ lru = "0.12"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 wat = "1"
+# for submit_task example only

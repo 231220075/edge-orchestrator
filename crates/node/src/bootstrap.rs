@@ -22,6 +22,11 @@ pub struct Node {
     pub ipc_handle: Option<crate::ipc::server::IpcServerHandle>,
     raft_incoming: tokio::sync::mpsc::Sender<RaftEnvelope>,
     raft_registry: RaftIdRegistry,
+    /// Known peer addresses (PeerId -> last advertised Multiaddr) for
+    /// re-dialing when a connection closes.
+    peer_addrs: std::collections::HashMap<libp2p::PeerId, libp2p::Multiaddr>,
+    /// Configured bootstrap peers, re-dialed periodically to form a mesh.
+    bootstrap_addrs: Vec<libp2p::Multiaddr>,
 }
 
 impl Node {
@@ -70,13 +75,14 @@ impl Node {
             .collect::<std::result::Result<Vec<_>, _>>()
             .with_context(|| "Failed to parse listen addresses")?;
 
+        let bootstrap_addrs: Vec<libp2p::Multiaddr> = config
+            .bootstrap_peers
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
         let swarm_config = SwarmConfig {
             listen_addresses,
-            bootstrap_peers: config
-                .bootstrap_peers
-                .iter()
-                .filter_map(|s| s.parse().ok())
-                .collect(),
+            bootstrap_peers: bootstrap_addrs.clone(),
         };
 
         let swarm = new_swarm(keypair, swarm_config, descriptor.clone())
@@ -115,6 +121,7 @@ impl Node {
             .context("Failed to create Raft node")?;
 
             let tx = raft_node.proposal_sender();
+            let state_handle = raft_node.state_handle();
             info!(
                 "Raft consensus initialized: raft_id={}, peers={:?}",
                 raft_id, raft_peers
@@ -125,6 +132,41 @@ impl Node {
                     tracing::error!("Raft node event loop error: {:#}", e);
                 }
             });
+
+            // Register this node in the replicated state so the scheduler can
+            // discover its raft_id and Execution role. Registration is retried
+            // in spawn_runtime until a leader commits it (the first propose is
+            // dropped if sent before the initial election finishes).
+            let mut self_desc = descriptor.clone();
+            self_desc.current_assigned_roles = config
+                .roles
+                .clone()
+                .into_iter()
+                .filter_map(|r| match r.as_str() {
+                    "Storage" => Some(eo_core::types::Role::Storage),
+                    "Execution" => Some(eo_core::types::Role::Execution),
+                    "Inference" => Some(eo_core::types::Role::Inference),
+                    "Coordinator" => Some(eo_core::types::Role::Coordinator),
+                    "Bootstrap" => Some(eo_core::types::Role::Bootstrap),
+                    _ => None,
+                })
+                .collect();
+            crate::orchestration::runtime_loop::spawn_register_loop(
+                raft_id,
+                self_desc,
+                tx.clone(),
+                state_handle.clone(),
+            );
+
+            // Scheduler (every node may propose AssignTask) and executor
+            // (only runs tasks assigned to itself). Both read replicated state.
+            crate::orchestration::runtime_loop::spawn_runtime(
+                raft_id,
+                state_handle,
+                tx.clone(),
+                Arc::clone(&object_store),
+            );
+
             tx
         };
 
@@ -148,16 +190,37 @@ impl Node {
             ipc_handle,
             raft_incoming: incoming_tx,
             raft_registry,
+            peer_addrs: std::collections::HashMap::new(),
+            bootstrap_addrs,
         })
     }
 
     pub async fn run_event_monitor(&mut self) -> Result<()> {
         info!("Node event monitor started");
+        let mut dial_tick = tokio::time::interval(std::time::Duration::from_secs(2));
 
         loop {
-            match self.swarm.events.recv().await {
+            tokio::select! {
+                _ = dial_tick.tick() => {
+                    // Periodic mesh maintenance: re-dial configured bootstrap
+                    // peers and every peer we have seen. libp2p dial is cheap
+                    // when already connected and repairs races/churn.
+                    for addr in self.bootstrap_addrs.clone() {
+                        let _ = self.swarm.commands
+                            .send(p2p::SwarmCommand::Dial { addr })
+                            .await;
+                    }
+                    for addr in self.peer_addrs.values().cloned() {
+                        let _ = self.swarm.commands
+                            .send(p2p::SwarmCommand::Dial { addr })
+                            .await;
+                    }
+                }
+                ev = self.swarm.events.recv() => {
+            match ev {
                 Some(Event::PeerDiscovered { peer_id, address }) => {
                     info!("mDNS: discovered peer {} at {}", peer_id, address);
+                    self.peer_addrs.insert(peer_id, address.clone());
                     // Establish a connection; descriptor request happens on
                     // PeerConnected once dialing has finished.
                     let _ = self
@@ -212,11 +275,20 @@ impl Node {
                 }
                 Some(Event::ConnectionClosed { peer_id }) => {
                     info!("Connection closed with {}", peer_id);
+                    if let Some(addr) = self.peer_addrs.get(&peer_id).cloned() {
+                        let _ = self
+                            .swarm
+                            .commands
+                            .send(p2p::SwarmCommand::Dial { addr })
+                            .await;
+                    }
                 }
                 None => {
                     info!("Event stream closed");
                     break;
                 }
+            }
+            }
             }
         }
         Ok(())

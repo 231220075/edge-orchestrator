@@ -23,8 +23,8 @@ pub struct RaftNode {
     /// Network transport for sending/receiving Raft messages.
     transport: Libp2pRaftTransport,
 
-    /// The replicated state machine.
-    state_machine: ClusterState,
+    /// The replicated state machine, shared with scheduler/executor loops.
+    state: Arc<std::sync::Mutex<ClusterState>>,
 
     /// Channel for receiving proposals.
     proposal_rx: mpsc::Receiver<Proposal>,
@@ -70,7 +70,7 @@ impl RaftNode {
         Ok(Self {
             raw_node,
             transport,
-            state_machine: ClusterState::default(),
+            state: Arc::new(std::sync::Mutex::new(ClusterState::default())),
             proposal_rx,
             proposal_tx,
             id,
@@ -82,9 +82,9 @@ impl RaftNode {
         self.proposal_tx.clone()
     }
 
-    /// Get a reference to the state machine.
-    pub fn state(&self) -> &ClusterState {
-        &self.state_machine
+    /// Get a cloneable handle to the replicated state machine.
+    pub fn state_handle(&self) -> Arc<std::sync::Mutex<ClusterState>> {
+        Arc::clone(&self.state)
     }
 
     /// Run the main Raft event loop.
@@ -199,8 +199,11 @@ impl RaftNode {
             match Proposal::decode(&entry.data) {
                 Ok(proposal) => {
                     debug!("Applying committed proposal at index {}", entry.index);
-                    self.state_machine.apply(proposal);
-                    self.state_machine.last_applied_index = entry.index;
+                    {
+                        let mut guard = self.state.lock().expect("state poisoned");
+                        guard.apply(proposal);
+                        guard.last_applied_index = entry.index;
+                    }
                 }
                 Err(e) => {
                     warn!(

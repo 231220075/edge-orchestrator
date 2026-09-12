@@ -216,6 +216,7 @@ impl JsonRpcHandler {
             resource_limits: ResourceLimits::default(),
             submitted_at: chrono::Utc::now(),
             pinned_node: None,
+            code_inline: Some(code_bytes.clone()),
         };
 
         // Propose task to Raft

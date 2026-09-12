@@ -11,3 +11,4 @@ pub mod wasm;
 // Re-export core traits
 pub use eo_core::traits::Sandbox;
 pub use registry::{default_registry, SandboxFactory, SandboxRegistry};
+pub use wasm::WasmtimeSandbox;

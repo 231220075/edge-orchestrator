@@ -156,6 +156,11 @@ pub struct ScheduledTask {
     pub submitted_at: DateTime<Utc>,
     /// Optional: pin execution to a specific node.
     pub pinned_node: Option<NodeId>,
+
+    /// Optional inline code bytes. v3 demo shortcut: avoids requiring blob
+    /// distribution over P2P. Production should use code_hash + CAS sync.
+    #[serde(default)]
+    pub code_inline: Option<Vec<u8>>,
 }
 
 /// Routing strategy for task-to-node assignment.
@@ -269,6 +274,7 @@ mod tests {
             resource_limits: ResourceLimits::default(),
             submitted_at: Utc::now(),
             pinned_node: None,
+            code_inline: None,
         };
 
         let json = serde_json::to_string(&task).expect("serialize");

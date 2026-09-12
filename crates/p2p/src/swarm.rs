@@ -100,7 +100,15 @@ pub fn new_swarm(
 
     tokio::spawn(async move {
         let bootstrap_peers = config.bootstrap_peers.clone();
-        run_event_loop(swarm, event_tx, cmd_rx, local_peer_id, self_descriptor, bootstrap_peers).await;
+        run_event_loop(
+            swarm,
+            event_tx,
+            cmd_rx,
+            local_peer_id,
+            self_descriptor,
+            bootstrap_peers,
+        )
+        .await;
     });
 
     Ok(SwarmHandle {
@@ -123,6 +131,7 @@ async fn run_event_loop(
 ) {
     // Dial every explicitly-configured bootstrap peer once at startup. This
     // guarantees a full mesh even when mDNS races or a LAN is flaky.
+    info!("Bootstrap peers configured: {}", bootstrap_peers.len());
     for addr in &bootstrap_peers {
         if let Err(e) = swarm.dial(addr.clone()) {
             warn!("Failed to dial bootstrap peer {}: {}", addr, e);
@@ -247,23 +256,34 @@ fn handle_behaviour_event(
                 .collect()
         }
 
-        EdgeOrchBehaviourEvent::RaftExchange(raft_event) => {
-            handle_raft_exchange(raft_event).into_iter().collect()
-        }
+        EdgeOrchBehaviourEvent::RaftExchange(raft_event) => handle_raft_exchange(raft_event, swarm)
+            .into_iter()
+            .collect(),
     }
 }
 
 fn handle_raft_exchange(
     event: libp2p::request_response::Event<RaftMessageRequest, RaftMessageResponse>,
+    swarm: &mut EdgeOrchSwarm,
 ) -> Option<Event> {
     use libp2p::request_response::{Event as RREvent, Message};
 
     match event {
         RREvent::Message { peer, message } => match message {
-            Message::Request { request, .. } => Some(Event::RaftMessageReceived {
-                peer_id: peer,
-                data: request.data,
-            }),
+            Message::Request {
+                request, channel, ..
+            } => {
+                // Respond so the sender's request-response transaction completes;
+                // the actual payload is delivered as an app event below.
+                let _ = swarm
+                    .behaviour_mut()
+                    .raft_exchange
+                    .send_response(channel, RaftMessageResponse { accepted: true });
+                Some(Event::RaftMessageReceived {
+                    peer_id: peer,
+                    data: request.data,
+                })
+            }
             Message::Response { .. } => None,
         },
         RREvent::OutboundFailure { peer, error, .. } => {

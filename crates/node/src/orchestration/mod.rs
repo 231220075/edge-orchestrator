@@ -7,6 +7,7 @@
 
 pub mod reporter;
 pub mod role_engine;
+pub mod runtime_loop;
 pub mod scheduler;
 pub mod topology;
 
