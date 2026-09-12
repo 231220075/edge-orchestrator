@@ -148,6 +148,7 @@ mod tests {
             advertised_addresses: vec![],
             current_assigned_roles: vec![],
             started_at: Utc::now(),
+            raft_id: None,
         }
     }
 

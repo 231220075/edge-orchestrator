@@ -39,6 +39,11 @@ pub struct NodeDescriptor {
     pub current_assigned_roles: Vec<Role>,
     /// When this node started up.
     pub started_at: DateTime<Utc>,
+
+    /// Static Raft participant ID (1..=N). None means this node does not
+    /// participate in the Raft group (e.g. the iPhone light trigger).
+    #[serde(default)]
+    pub raft_id: Option<u64>,
 }
 
 /// Classification of a node's resource profile.
@@ -224,6 +229,7 @@ mod tests {
             advertised_addresses: vec![],
             current_assigned_roles: vec![Role::Execution],
             started_at: Utc::now(),
+            raft_id: None,
         };
 
         let json = serde_json::to_string(&desc).expect("serialize");

@@ -20,6 +20,7 @@ fn make_test_descriptor() -> NodeDescriptor {
         advertised_addresses: vec![],
         current_assigned_roles: vec![Role::Execution],
         started_at: Utc::now(),
+        raft_id: None,
     }
 }
 

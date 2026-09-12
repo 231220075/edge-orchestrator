@@ -152,3 +152,181 @@ async fn write_length_prefixed<T: AsyncWrite + Unpin + Send>(
     io.write_all(data).await?;
     Ok(())
 }
+// (appended to protocol.rs)
+
+// ---------------------------------------------------------------------------
+// Raft message transport protocol
+// ---------------------------------------------------------------------------
+
+pub const RAFT_PROTOCOL: &str = "/edge-orch/raft/1.0.0";
+const RAFT_REQUEST_MAX_SIZE: usize = 16 * 1024 * 1024;
+const RAFT_RESPONSE_MAX_SIZE: usize = 1024;
+
+/// A raw raft-rs protobuf message; raft's own Message already carries
+/// `from`/`to` in its header, so the transport does not duplicate them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaftMessageRequest {
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaftMessageResponse {
+    pub accepted: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RaftMessageCodec;
+
+impl RaftMessageCodec {
+    pub fn protocol() -> StreamProtocol {
+        StreamProtocol::new(RAFT_PROTOCOL)
+    }
+}
+#[async_trait::async_trait]
+impl request_response::Codec for RaftMessageCodec {
+    type Protocol = StreamProtocol;
+    type Request = RaftMessageRequest;
+    type Response = RaftMessageResponse;
+
+    async fn read_request<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let data = read_length_prefixed(io, RAFT_REQUEST_MAX_SIZE).await?;
+        serde_json::from_slice(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let data = read_length_prefixed(io, RAFT_RESPONSE_MAX_SIZE).await?;
+        serde_json::from_slice(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> std::io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let data = serde_json::to_vec(&req)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_length_prefixed(io, &data).await
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+        resp: Self::Response,
+    ) -> std::io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let data = serde_json::to_vec(&resp)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_length_prefixed(io, &data).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blob distribution protocol
+// ---------------------------------------------------------------------------
+
+pub const BLOB_PROTOCOL: &str = "/edge-orch/blob/1.0.0";
+const BLOB_REQUEST_MAX_SIZE: usize = 4 * 1024;
+const BLOB_RESPONSE_MAX_SIZE: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobRequest {
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobResponse {
+    pub found: bool,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BlobCodec;
+
+impl BlobCodec {
+    pub fn protocol() -> StreamProtocol {
+        StreamProtocol::new(BLOB_PROTOCOL)
+    }
+}
+#[async_trait::async_trait]
+impl request_response::Codec for BlobCodec {
+    type Protocol = StreamProtocol;
+    type Request = BlobRequest;
+    type Response = BlobResponse;
+
+    async fn read_request<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let data = read_length_prefixed(io, BLOB_REQUEST_MAX_SIZE).await?;
+        serde_json::from_slice(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let data = read_length_prefixed(io, BLOB_RESPONSE_MAX_SIZE).await?;
+        serde_json::from_slice(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> std::io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let data = serde_json::to_vec(&req)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_length_prefixed(io, &data).await
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+        resp: Self::Response,
+    ) -> std::io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let data = serde_json::to_vec(&resp)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_length_prefixed(io, &data).await
+    }
+}

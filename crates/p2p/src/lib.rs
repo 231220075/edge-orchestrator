@@ -20,4 +20,8 @@ pub mod transport;
 // Re-export commonly used types
 pub use behaviour::EdgeOrchBehaviour;
 pub use discovery::Event;
+pub use protocol::{
+    BlobCodec, BlobRequest, BlobResponse, RaftMessageCodec, RaftMessageRequest,
+    RaftMessageResponse, BLOB_PROTOCOL, RAFT_PROTOCOL,
+};
 pub use swarm::{new_swarm, EdgeOrchSwarm, SwarmCommand, SwarmConfig, SwarmHandle};

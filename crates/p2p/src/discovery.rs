@@ -57,4 +57,12 @@ pub enum Event {
         /// The peer.
         peer_id: PeerId,
     },
+
+    /// A Raft protobuf message arrived over the network.
+    RaftMessageReceived {
+        /// The libp2p peer that sent it.
+        peer_id: PeerId,
+        /// Serialized raft message payload (prost bytes).
+        data: Vec<u8>,
+    },
 }

@@ -39,6 +39,16 @@ pub struct NodeConfig {
     /// Roles to request on startup.
     #[serde(default)]
     pub roles: Vec<String>,
+
+    /// Static raft participant id (1..=N). None = not a raft voter (e.g. a
+    /// light client trigger node).
+    #[serde(default)]
+    pub raft_id: Option<u64>,
+
+    /// Static cluster membership: the raft ids that vote from the start.
+    /// Every raft voter must use the SAME list (e.g. [1, 2, 3]).
+    #[serde(default)]
+    pub raft_peers: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,6 +195,7 @@ impl NodeConfig {
             advertised_addresses: vec![],
             current_assigned_roles: roles,
             started_at: Utc::now(),
+            raft_id: self.raft_id,
         }
     }
 }

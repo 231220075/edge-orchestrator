@@ -1,125 +1,120 @@
-//! Raft network transport over libp2p.
-//!
-//! Routes Raft messages between nodes using the P2P mesh. Messages
-//! are serialized with protobuf (via the prost-codec) and sent over
-//! a custom libp2p request-response protocol.
+//! bytes carried over request-response protocol.
+
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use eo_core::error::Result;
 use raft::eraftpb::Message as RaftMessage;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
 
-/// A Raft message wrapped for transport over the P2P network.
+use p2p::SwarmCommand;
+
+#[derive(Debug, Clone, Default)]
+pub struct RaftIdRegistry {
+    inner: Arc<RwLock<HashMap<u64, libp2p::PeerId>>>,
+}
+
+impl RaftIdRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, raft_id: u64, peer_id: libp2p::PeerId) {
+        self.inner
+            .write()
+            .expect("registry poisoned")
+            .insert(raft_id, peer_id);
+    }
+
+    pub fn get(&self, raft_id: u64) -> Option<libp2p::PeerId> {
+        self.inner
+            .read()
+            .expect("registry poisoned")
+            .get(&raft_id)
+            .copied()
+    }
+
+    pub fn remove(&self, raft_id: u64) {
+        self.inner
+            .write()
+            .expect("registry poisoned")
+            .remove(&raft_id);
+    }
+
+    pub fn knows_all(&self, peer_ids: &[u64]) -> bool {
+        let guard = self.inner.read().expect("registry poisoned");
+        peer_ids.iter().all(|id| guard.contains_key(id))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RaftEnvelope {
-    /// The sender's Raft node ID.
-    pub from: u64,
-    /// The intended recipient's Raft node ID.
-    pub to: u64,
-    /// The serialized Raft message (protobuf bytes).
     pub data: Vec<u8>,
 }
 
 impl RaftEnvelope {
-    /// Create a new envelope for a Raft message.
-    pub fn new(from: u64, to: u64, msg: &RaftMessage) -> Result<Self> {
-        let data = prost::Message::encode_to_vec(msg);
-        Ok(Self { from, to, data })
+    pub fn new(_from: u64, _to: u64, msg: &RaftMessage) -> Result<Self> {
+        Ok(Self {
+            data: prost::Message::encode_to_vec(msg),
+        })
     }
 
-    /// Decode the enclosed Raft message.
     pub fn decode(&self) -> std::result::Result<RaftMessage, prost::DecodeError> {
         prost::Message::decode(self.data.as_slice())
     }
 }
 
-/// Network transport for sending and receiving Raft messages over libp2p.
-///
-/// Uses an mpsc channel to communicate with the P2P swarm task.
-/// The swarm task handles the actual network I/O; this transport
-/// provides a simple send/recv interface for the Raft node.
 pub struct Libp2pRaftTransport {
-    /// Sender for sending Raft messages to the P2P layer.
-    swarm_sender: mpsc::Sender<SwarmRaftCommand>,
-
-    /// Receiver for incoming Raft messages from the P2P layer.
-    raft_receiver: mpsc::Receiver<RaftEnvelope>,
+    swarm_commands: mpsc::Sender<SwarmCommand>,
+    incoming: mpsc::Receiver<RaftEnvelope>,
+    registry: RaftIdRegistry,
 }
 
-/// Commands sent from Raft to the P2P swarm.
-#[derive(Debug)]
-pub enum SwarmRaftCommand {
-    /// Send a Raft message to a peer.
-    SendRaftMessage {
-        /// Target peer (identified by Raft node ID).
-        to: u64,
-        /// The serialized Raft protobuf message.
-        data: Vec<u8>,
-    },
-}
-
-/// Create a paired transport — returns the Raft-side transport and
-/// the swarm-side sender/receiver for integrating with the P2P task.
-pub fn create_raft_transport() -> (
-    Libp2pRaftTransport,
-    mpsc::Receiver<SwarmRaftCommand>,
-    mpsc::Sender<RaftEnvelope>,
-) {
-    let (cmd_tx, cmd_rx) = mpsc::channel(256);
-    let (msg_tx, msg_rx) = mpsc::channel(256);
-
+pub fn create_raft_transport(
+    swarm_commands: mpsc::Sender<SwarmCommand>,
+) -> (Libp2pRaftTransport, mpsc::Sender<RaftEnvelope>) {
+    let (incoming_tx, incoming_rx) = mpsc::channel(256);
     let transport = Libp2pRaftTransport {
-        swarm_sender: cmd_tx,
-        raft_receiver: msg_rx,
+        swarm_commands,
+        incoming: incoming_rx,
+        registry: RaftIdRegistry::new(),
     };
-
-    (transport, cmd_rx, msg_tx)
+    (transport, incoming_tx)
 }
 
 impl Libp2pRaftTransport {
-    /// Send a Raft message to a peer.
-    ///
-    /// # Arguments
-    /// * `to` — The recipient's Raft node ID.
-    /// * `msg` — The Raft message to send.
-    pub fn send(&self, to: u64, msg: &RaftMessage) -> Result<()> {
-        let data = prost::Message::encode_to_vec(msg);
+    pub fn registry(&self) -> &RaftIdRegistry {
+        &self.registry
+    }
 
-        self.swarm_sender
-            .try_send(SwarmRaftCommand::SendRaftMessage { to, data })
+    pub fn send(&self, to: u64, msg: &RaftMessage) -> Result<()> {
+        let peer_id = self.registry.get(to).ok_or_else(|| {
+            eo_core::error::CoreError::Network(format!(
+                "no libp2p PeerId for raft id {to} (descriptor not received yet)"
+            ))
+        })?;
+
+        let envelope = RaftEnvelope::new(0, to, msg)?;
+        self.swarm_commands
+            .try_send(SwarmCommand::SendRaftMessage {
+                peer_id,
+                data: envelope.data,
+            })
             .map_err(|e| {
                 eo_core::error::CoreError::Network(format!(
-                    "failed to send Raft message to {to}: {e}"
+                    "failed to queue raft message for {to}: {e}"
                 ))
             })?;
-
-        debug!("Sent Raft message to {}", to);
+        debug!("Queued raft message to raft id {}", to);
         Ok(())
     }
 
-    /// Receive the next Raft message from the network.
-    ///
-    /// Returns `None` if the transport has been shut down.
     pub async fn recv(&mut self) -> Option<RaftEnvelope> {
-        self.raft_receiver.recv().await
+        self.incoming.recv().await
     }
 }
 
-/// Map Raft node IDs to libp2p [`PeerId`]s.
-///
-/// In the current implementation, Raft node IDs are u64 values
-/// that need to be resolved to libp2p PeerIds for actual message
-/// delivery. This mapping is maintained by the P2P layer based
-/// on peer discovery and descriptor exchange.
-#[derive(Debug, Clone, Default)]
-pub struct PeerRegistry {
-    // Maps Raft node ID → libp2p PeerId
-    // TODO: Implement full mapping registry in Phase 2.6
-}
-
-impl PeerRegistry {
-    /// Create a new empty peer registry.
-    pub fn new() -> Self {
-        Self::default()
-    }
+pub fn envelope_from_data(data: Vec<u8>) -> RaftEnvelope {
+    RaftEnvelope { data }
 }

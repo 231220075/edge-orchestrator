@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 use crate::behaviour::{EdgeOrchBehaviour, EdgeOrchBehaviourEvent};
 use crate::discovery::Event;
 use crate::protocol::{DescriptorRequest, DescriptorResponse};
+use crate::protocol::{RaftMessageRequest, RaftMessageResponse};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -34,6 +35,13 @@ pub enum SwarmCommand {
     RequestDescriptor {
         /// The peer to request from.
         peer_id: PeerId,
+    },
+    /// Send a raw raft protobuf message to a peer (target resolved by caller).
+    SendRaftMessage {
+        /// The recipient libp2p peer.
+        peer_id: PeerId,
+        /// Serialized protobuf bytes.
+        data: Vec<u8>,
     },
 }
 
@@ -152,6 +160,11 @@ async fn run_event_loop(
                         swarm.behaviour_mut().descriptor_exchange
                             .send_request(&peer_id, request);
                     }
+                    Some(SwarmCommand::SendRaftMessage { peer_id, data }) => {
+                        let request = RaftMessageRequest { data };
+                        swarm.behaviour_mut().raft_exchange
+                            .send_request(&peer_id, request);
+                    }
                     None => {
                         debug!("Command sender dropped, shutting down swarm event loop");
                         break;
@@ -211,6 +224,33 @@ fn handle_behaviour_event(
         EdgeOrchBehaviourEvent::DescriptorExchange(req_resp_event) => {
             handle_descriptor_exchange(req_resp_event, self_descriptor)
         }
+
+        EdgeOrchBehaviourEvent::RaftExchange(raft_event) => handle_raft_exchange(raft_event),
+    }
+}
+
+fn handle_raft_exchange(
+    event: libp2p::request_response::Event<RaftMessageRequest, RaftMessageResponse>,
+) -> Option<Event> {
+    use libp2p::request_response::{Event as RREvent, Message};
+
+    match event {
+        RREvent::Message { peer, message } => match message {
+            Message::Request { request, .. } => Some(Event::RaftMessageReceived {
+                peer_id: peer,
+                data: request.data,
+            }),
+            Message::Response { .. } => None,
+        },
+        RREvent::OutboundFailure { peer, error, .. } => {
+            warn!("Outbound raft request failed to {}: {}", peer, error);
+            None
+        }
+        RREvent::InboundFailure { peer, error, .. } => {
+            warn!("Inbound raft request failed from {}: {}", peer, error);
+            None
+        }
+        RREvent::ResponseSent { .. } => None,
     }
 }
 

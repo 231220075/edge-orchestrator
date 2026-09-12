@@ -80,15 +80,27 @@ impl CasRaftStorage {
         }
     }
 
-    /// Create a new empty storage (no prior state).
-    pub fn new_empty(object_store: Arc<LocalObjectStore>) -> Self {
+    /// Create a new empty storage with a static initial configuration.
+    ///
+    /// voters are the raft ids participating from the start (e.g. 1,2,3).
+    /// This is how a static cluster bootstraps without dynamic membership
+    /// changes (documented stub in v3).
+    pub fn new_empty(object_store: Arc<LocalObjectStore>, voters: Vec<u64>) -> Self {
+        let conf_state = ConfState {
+            voters,
+            learners: Vec::new(),
+            voters_outgoing: Vec::new(),
+            auto_leave: false,
+            ..Default::default()
+        };
+
         Self {
             object_store,
             entry_cache: Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(ENTRY_CACHE_SIZE).unwrap(),
             )),
             hard_state: Mutex::new(None),
-            conf_state: Mutex::new(None),
+            conf_state: Mutex::new(Some(conf_state)),
             first_index: Mutex::new(1),
             last_index: Mutex::new(0),
             entry_hashes: Mutex::new(vec![None]), // index 0 is unused
@@ -401,7 +413,7 @@ mod tests {
     #[test]
     fn initial_state_on_empty_store() {
         let (_store, arc) = make_store();
-        let storage = CasRaftStorage::new_empty(arc);
+        let storage = CasRaftStorage::new_empty(arc, vec![1]);
         let state = storage.initial_state().unwrap();
         assert_eq!(state.hard_state.term, 0);
     }
@@ -409,7 +421,7 @@ mod tests {
     #[test]
     fn append_and_read_entries() {
         let (_store, arc) = make_store();
-        let storage = CasRaftStorage::new_empty(arc);
+        let storage = CasRaftStorage::new_empty(arc, vec![1]);
 
         let entry = Entry {
             index: 1,
@@ -432,7 +444,7 @@ mod tests {
     #[test]
     fn term_lookup() {
         let (_store, arc) = make_store();
-        let storage = CasRaftStorage::new_empty(arc);
+        let storage = CasRaftStorage::new_empty(arc, vec![1]);
 
         // Entry with term encoded in first 8 bytes
         let term: u64 = 5;
@@ -452,7 +464,7 @@ mod tests {
     #[test]
     fn snapshot_creation() {
         let (_store, arc) = make_store();
-        let storage = CasRaftStorage::new_empty(arc);
+        let storage = CasRaftStorage::new_empty(arc, vec![1]);
 
         for i in 1..=5 {
             let entry = Entry {

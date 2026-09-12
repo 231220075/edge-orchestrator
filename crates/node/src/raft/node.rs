@@ -37,18 +37,27 @@ pub struct RaftNode {
 
 impl RaftNode {
     /// Create a new Raft node.
-    pub async fn new(id: u64, _peers: Vec<u64>, transport: Libp2pRaftTransport) -> Result<Self> {
+    ///
+    /// voters is the static cluster membership (raft ids). Every node must be
+    /// started with the SAME voters list so they agree on the initial config.
+    pub async fn new(
+        id: u64,
+        voters: Vec<u64>,
+        object_store: Arc<LocalObjectStore>,
+        transport: Libp2pRaftTransport,
+    ) -> Result<Self> {
         let mut config = Config {
             id,
             ..Default::default()
         };
         config.election_tick = 10;
         config.heartbeat_tick = 3;
+        // Pre-vote avoids term inflation on network partitions, which matches
+        // the kill-leader demo where a node is forcibly removed.
+        config.pre_vote = true;
+        config.check_quorum = true;
 
-        let storage = CasRaftStorage::new_empty(Arc::new(
-            LocalObjectStore::new(std::env::temp_dir().join("edge-orch-raft"))
-                .map_err(|e| eo_core::error::CoreError::Internal(format!("store: {e}")))?,
-        ));
+        let storage = CasRaftStorage::new_empty(object_store, voters);
 
         let discard_logger = slog::Logger::root(slog::Discard, slog::o!());
         let raw_node = RawNode::new(&config, storage, &discard_logger).map_err(|e| {
