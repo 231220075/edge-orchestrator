@@ -25,3 +25,9 @@ pub use protocol::{
     RaftMessageResponse, BLOB_PROTOCOL, RAFT_PROTOCOL,
 };
 pub use swarm::{new_swarm, EdgeOrchSwarm, SwarmCommand, SwarmConfig, SwarmHandle};
+
+/// A source for content-addressed blobs. The node implements this on top of its
+/// CAS store so the swarm can answer incoming blob requests synchronously.
+pub trait BlobProvider: Send + Sync {
+    fn get_blob(&self, hash: &str) -> Option<Vec<u8>>;
+}

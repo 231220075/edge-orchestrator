@@ -74,4 +74,24 @@ pub enum Event {
         /// Serialized raft message payload (prost bytes).
         data: Vec<u8>,
     },
+
+    /// A peer asked us for a CAS blob (we must answer via the swarm).
+    BlobRequestReceived {
+        /// The peer requesting the blob.
+        peer_id: PeerId,
+        /// The requested content hash.
+        hash: String,
+    },
+
+    /// A peer answered our blob request.
+    BlobResponseReceived {
+        /// The peer that answered.
+        peer_id: PeerId,
+        /// The content hash requested.
+        hash: String,
+        /// Whether the peer had the blob.
+        found: bool,
+        /// The blob bytes (empty when found is false).
+        data: Vec<u8>,
+    },
 }

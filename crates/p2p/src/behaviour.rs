@@ -7,7 +7,7 @@ use libp2p::ping;
 use libp2p::request_response;
 use libp2p::swarm::NetworkBehaviour;
 
-use crate::protocol::{DescriptorCodec, RaftMessageCodec};
+use crate::protocol::{BlobCodec, DescriptorCodec, RaftMessageCodec};
 
 #[derive(NetworkBehaviour)]
 pub struct EdgeOrchBehaviour {
@@ -16,6 +16,7 @@ pub struct EdgeOrchBehaviour {
     pub ping: ping::Behaviour,
     pub descriptor_exchange: request_response::Behaviour<DescriptorCodec>,
     pub raft_exchange: request_response::Behaviour<RaftMessageCodec>,
+    pub blob_exchange: request_response::Behaviour<BlobCodec>,
 }
 
 impl EdgeOrchBehaviour {
@@ -43,12 +44,21 @@ impl EdgeOrchBehaviour {
             request_response::Config::default(),
         );
 
+        let blob_exchange = request_response::Behaviour::new(
+            std::iter::once((
+                BlobCodec::protocol(),
+                request_response::ProtocolSupport::Full,
+            )),
+            request_response::Config::default(),
+        );
+
         Self {
             identify: identify::Behaviour::new(identify_config),
             mdns,
             ping: ping::Behaviour::new(ping::Config::default()),
             descriptor_exchange,
             raft_exchange,
+            blob_exchange,
         }
     }
 }

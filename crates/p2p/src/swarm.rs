@@ -13,8 +13,9 @@ use tracing::{debug, info, warn};
 
 use crate::behaviour::{EdgeOrchBehaviour, EdgeOrchBehaviourEvent};
 use crate::discovery::Event;
-use crate::protocol::{DescriptorRequest, DescriptorResponse};
+use crate::protocol::{BlobRequest, BlobResponse, DescriptorRequest, DescriptorResponse};
 use crate::protocol::{RaftMessageRequest, RaftMessageResponse};
+use crate::BlobProvider;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -43,6 +44,8 @@ pub enum SwarmCommand {
         /// Serialized protobuf bytes.
         data: Vec<u8>,
     },
+    /// Ask a peer for a CAS blob by hash.
+    RequestBlob { peer_id: PeerId, hash: String },
 }
 
 /// Handle for interacting with a running swarm.
@@ -67,6 +70,7 @@ pub fn new_swarm(
     keypair: identity::Keypair,
     config: SwarmConfig,
     self_descriptor: NodeDescriptor,
+    blob_provider: Option<std::sync::Arc<dyn BlobProvider>>,
 ) -> Result<SwarmHandle> {
     let local_peer_id = keypair.public().to_peer_id();
     let local_public_key = keypair.public();
@@ -107,6 +111,7 @@ pub fn new_swarm(
             local_peer_id,
             self_descriptor,
             bootstrap_peers,
+            blob_provider,
         )
         .await;
     });
@@ -128,6 +133,7 @@ async fn run_event_loop(
     self_peer_id: PeerId,
     self_descriptor: NodeDescriptor,
     bootstrap_peers: Vec<Multiaddr>,
+    blob_provider: Option<std::sync::Arc<dyn BlobProvider>>,
 ) {
     // Dial every explicitly-configured bootstrap peer once at startup. This
     // guarantees a full mesh even when mDNS races or a LAN is flaky.
@@ -155,7 +161,7 @@ async fn run_event_loop(
                         vec![Event::PeerConnected { peer_id }]
                     }
                     Some(SwarmEvent::Behaviour(event)) => {
-                        handle_behaviour_event(event, self_peer_id, &self_descriptor, &mut swarm)
+                        handle_behaviour_event(event, self_peer_id, &self_descriptor, &mut swarm, blob_provider.as_deref())
                     }
                     Some(_) => Vec::new(),
                     None => break,
@@ -188,6 +194,11 @@ async fn run_event_loop(
                         swarm.behaviour_mut().raft_exchange
                             .send_request(&peer_id, request);
                     }
+                    Some(SwarmCommand::RequestBlob { peer_id, hash }) => {
+                        let request = BlobRequest { hash };
+                        swarm.behaviour_mut().blob_exchange
+                            .send_request(&peer_id, request);
+                    }
                     None => {
                         debug!("Command sender dropped, shutting down swarm event loop");
                         break;
@@ -207,6 +218,7 @@ fn handle_behaviour_event(
     self_peer_id: PeerId,
     self_descriptor: &NodeDescriptor,
     swarm: &mut EdgeOrchSwarm,
+    blob_provider: Option<&dyn BlobProvider>,
 ) -> Vec<Event> {
     match event {
         EdgeOrchBehaviourEvent::Mdns(mdns_event) => match mdns_event {
@@ -253,12 +265,68 @@ fn handle_behaviour_event(
         EdgeOrchBehaviourEvent::DescriptorExchange(req_resp_event) => {
             handle_descriptor_exchange(req_resp_event, self_descriptor, swarm)
                 .into_iter()
-                .collect()
+                .collect::<Vec<Event>>()
         }
 
         EdgeOrchBehaviourEvent::RaftExchange(raft_event) => handle_raft_exchange(raft_event, swarm)
             .into_iter()
-            .collect(),
+            .collect::<Vec<Event>>(),
+        EdgeOrchBehaviourEvent::BlobExchange(blob_event) => {
+            handle_blob_exchange(blob_event, swarm, blob_provider)
+                .into_iter()
+                .collect::<Vec<Event>>()
+        }
+        .into_iter()
+        .collect(),
+    }
+}
+
+fn handle_blob_exchange(
+    event: libp2p::request_response::Event<BlobRequest, BlobResponse>,
+    swarm: &mut EdgeOrchSwarm,
+    blob_provider: Option<&dyn BlobProvider>,
+) -> Option<Event> {
+    use libp2p::request_response::{Event as RREvent, Message};
+
+    match event {
+        RREvent::Message { peer, message } => match message {
+            Message::Request {
+                request, channel, ..
+            } => {
+                let hash = request.hash.clone();
+                let (found, data) = match blob_provider.and_then(|p| p.get_blob(&hash)) {
+                    Some(bytes) => (true, bytes),
+                    None => (false, Vec::new()),
+                };
+                let _ = swarm.behaviour_mut().blob_exchange.send_response(
+                    channel,
+                    BlobResponse {
+                        hash: hash.clone(),
+                        found,
+                        data: data.clone(),
+                    },
+                );
+                Some(Event::BlobRequestReceived {
+                    peer_id: peer,
+                    hash,
+                })
+            }
+            Message::Response { response, .. } => Some(Event::BlobResponseReceived {
+                peer_id: peer,
+                hash: response.hash,
+                found: response.found,
+                data: response.data,
+            }),
+        },
+        RREvent::OutboundFailure { peer, error, .. } => {
+            warn!("Outbound blob request failed to {}: {}", peer, error);
+            None
+        }
+        RREvent::InboundFailure { peer, error, .. } => {
+            warn!("Inbound blob request failed from {}: {}", peer, error);
+            None
+        }
+        RREvent::ResponseSent { .. } => None,
     }
 }
 

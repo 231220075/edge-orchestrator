@@ -258,6 +258,7 @@ pub struct BlobRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobResponse {
+    pub hash: String,
     pub found: bool,
     pub data: Vec<u8>,
 }

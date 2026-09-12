@@ -13,6 +13,17 @@ use crate::config::NodeConfig;
 use crate::raft::network::{envelope_from_data, RaftIdRegistry};
 use crate::raft::RaftEnvelope;
 
+/// Wraps the CAS store so the p2p crate can answer blob requests.
+struct CasBlobProvider {
+    store: Arc<storage::LocalObjectStore>,
+}
+
+impl p2p::BlobProvider for CasBlobProvider {
+    fn get_blob(&self, hash: &str) -> Option<Vec<u8>> {
+        self.store.get_blob(&hash.to_string()).ok()
+    }
+}
+
 pub struct Node {
     pub descriptor: NodeDescriptor,
     pub swarm: SwarmHandle,
@@ -67,6 +78,14 @@ impl Node {
             descriptor.node_id, descriptor.raft_id, descriptor.capabilities
         );
 
+        // 3b. Initialize CAS object store (needed by the swarm blob protocol)
+        let store_root = store_dir.to_path_buf();
+        let object_store = Arc::new(
+            storage::LocalObjectStore::new(store_root.clone())
+                .context("Failed to initialize CAS object store")?,
+        );
+        info!("CAS object store initialized at {}", store_root.display());
+
         // 4. Build and start P2P swarm
         let listen_addresses: Vec<libp2p::Multiaddr> = config
             .listen_addresses
@@ -85,17 +104,17 @@ impl Node {
             bootstrap_peers: bootstrap_addrs.clone(),
         };
 
-        let swarm = new_swarm(keypair, swarm_config, descriptor.clone())
-            .context("Failed to start P2P swarm")?;
+        let blob_provider = Arc::new(CasBlobProvider {
+            store: Arc::clone(&object_store),
+        });
+        let swarm = new_swarm(
+            keypair,
+            swarm_config,
+            descriptor.clone(),
+            Some(blob_provider),
+        )
+        .context("Failed to start P2P swarm")?;
         info!("P2P swarm started successfully");
-
-        // 5. Initialize CAS object store
-        let store_root = store_dir.to_path_buf();
-        let object_store = Arc::new(
-            storage::LocalObjectStore::new(store_root.clone())
-                .context("Failed to initialize CAS object store")?,
-        );
-        info!("CAS object store initialized at {}", store_root.display());
 
         // 6. Initialize Raft consensus (static cluster)
         // A node without raft_id is a light client: still runs storage/IPC but
@@ -251,6 +270,22 @@ impl Node {
                     if let Some(raft_id) = descriptor.raft_id {
                         self.raft_registry.insert(raft_id, peer_id);
                         info!("Mapped raft id {} -> peer {}", raft_id, peer_id);
+                    }
+                }
+                Some(Event::BlobRequestReceived { peer_id, hash }) => {
+                    // Swarm already answered with the provider; here we just
+                    // observe requests for observability.
+                    debug!("Blob {} requested by {}", hash, peer_id);
+                }
+                Some(Event::BlobResponseReceived {
+                    peer_id,
+                    hash,
+                    found,
+                    data,
+                }) => {
+                    if found && !data.is_empty() {
+                        let _ = self.object_store.put_blob(&data);
+                        info!("Blob {} fetched from {} ({} bytes)", hash, peer_id, data.len());
                     }
                 }
                 Some(Event::RaftMessageReceived { peer_id, data }) => {

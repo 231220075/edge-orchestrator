@@ -34,7 +34,7 @@ async fn single_swarm_starts_listening() {
     };
     let descriptor = make_test_descriptor();
 
-    let handle = new_swarm(keypair, config, descriptor).unwrap();
+    let handle = new_swarm(keypair, config, descriptor, None).unwrap();
 
     // Wait for the NewListenAddr event
     let result = timeout(TEST_TIMEOUT, async {
@@ -73,8 +73,8 @@ async fn two_nodes_discover_each_other() {
         bootstrap_peers: vec![],
     };
 
-    let handle1 = new_swarm(keypair1, config1, make_test_descriptor()).unwrap();
-    let handle2 = new_swarm(keypair2, config2, make_test_descriptor()).unwrap();
+    let handle1 = new_swarm(keypair1, config1, make_test_descriptor(), None).unwrap();
+    let handle2 = new_swarm(keypair2, config2, make_test_descriptor(), None).unwrap();
 
     let events1 = handle1.events;
     let events2 = handle2.events;
@@ -147,8 +147,8 @@ async fn descriptor_exchange_completes() {
         bootstrap_peers: vec![],
     };
 
-    let handle1 = new_swarm(keypair1, config1, make_test_descriptor()).unwrap();
-    let handle2 = new_swarm(keypair2, config2, make_test_descriptor()).unwrap();
+    let handle1 = new_swarm(keypair1, config1, make_test_descriptor(), None).unwrap();
+    let handle2 = new_swarm(keypair2, config2, make_test_descriptor(), None).unwrap();
 
     let events1 = handle1.events;
     let events2 = handle2.events;
@@ -216,7 +216,7 @@ async fn peer_expires_on_timeout() {
         bootstrap_peers: vec![],
     };
     let descriptor = make_test_descriptor();
-    let mut handle = new_swarm(keypair, config, descriptor).unwrap();
+    let mut handle = new_swarm(keypair, config, descriptor, None).unwrap();
 
     // Verify the swarm starts and produces a NewListenAddr event
     let got_listen = timeout(Duration::from_secs(5), async {
@@ -232,4 +232,76 @@ async fn peer_expires_on_timeout() {
     .unwrap_or(false);
 
     assert!(got_listen, "Swarm should produce a NewListenAddr event");
+}
+
+struct MemBlob(std::collections::HashMap<String, Vec<u8>>);
+impl p2p::BlobProvider for MemBlob {
+    fn get_blob(&self, hash: &str) -> Option<Vec<u8>> {
+        self.0.get(hash).cloned()
+    }
+}
+
+#[tokio::test]
+async fn blob_is_served_between_two_swarms() {
+    use std::time::Duration;
+    let keypair1 = identity::Keypair::generate_ed25519();
+    let keypair2 = identity::Keypair::generate_ed25519();
+    let peer1_id = keypair1.public().to_peer_id();
+    let mut blob = std::collections::HashMap::new();
+    blob.insert("abc".to_string(), b"hello-blob".to_vec());
+    let h1 = new_swarm(
+        keypair1,
+        SwarmConfig {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            bootstrap_peers: Vec::new(),
+        },
+        make_test_descriptor(),
+        Some(std::sync::Arc::new(MemBlob(blob))),
+    )
+    .unwrap();
+    let mut ev1 = h1.events;
+    let addr1 = loop {
+        match tokio::time::timeout(Duration::from_secs(5), ev1.recv()).await {
+            Ok(Some(Event::NewListenAddr { address })) => break address,
+            Ok(Some(_)) => continue,
+            _ => panic!("no listen"),
+        }
+    };
+    let h2 = new_swarm(
+        keypair2,
+        SwarmConfig {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            bootstrap_peers: vec![addr1],
+        },
+        make_test_descriptor(),
+        None,
+    )
+    .unwrap();
+    let mut ev2 = h2.events;
+    // wait until the bootstrap connection to peer1 is established
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), ev2.recv()).await {
+            Ok(Some(Event::PeerConnected { peer_id })) if peer_id == peer1_id => break,
+            Ok(Some(_)) => continue,
+            _ => panic!("no connect"),
+        }
+    }
+    h2.commands
+        .send(p2p::SwarmCommand::RequestBlob {
+            peer_id: peer1_id,
+            hash: "abc".into(),
+        })
+        .await
+        .unwrap();
+    let got = loop {
+        match tokio::time::timeout(Duration::from_secs(10), ev2.recv()).await {
+            Ok(Some(Event::BlobResponseReceived { found, data, .. })) => {
+                assert!(found);
+                break data;
+            }
+            Ok(Some(_)) => continue,
+            _ => panic!("no blob"),
+        }
+    };
+    assert_eq!(got, b"hello-blob");
 }
