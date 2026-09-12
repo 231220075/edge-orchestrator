@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
 //! Edge-Cloud Orchestrator — Orchestration Engine
 //!
 //! Provides the role orchestration engine, task scheduler,

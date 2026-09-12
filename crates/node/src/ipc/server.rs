@@ -10,7 +10,7 @@ use eo_core::error::{CoreError, Result};
 use tokio::net::UnixListener;
 use tracing::{error, info};
 
-use crate::handler::{JsonRpcHandler, JsonRpcRequest};
+use crate::ipc::handler::{JsonRpcHandler, JsonRpcRequest};
 
 /// A Unix Domain Socket server that accepts JSON-RPC 2.0 requests.
 ///

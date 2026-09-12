@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
+use crate::raft::Proposal;
 use eo_core::types::{ResourceLimits, RoutingStrategy, ScheduledTask};
-use eo_raft::Proposal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use storage::LocalObjectStore;

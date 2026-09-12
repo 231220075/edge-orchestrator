@@ -9,10 +9,10 @@ use storage::LocalObjectStore;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::network::Libp2pRaftTransport;
-use crate::proposal::Proposal;
-use crate::state_machine::ClusterState;
-use crate::storage::CasRaftStorage;
+use crate::raft::network::Libp2pRaftTransport;
+use crate::raft::proposal::Proposal;
+use crate::raft::state_machine::ClusterState;
+use crate::raft::storage::CasRaftStorage;
 
 /// A Raft participant node.
 pub struct RaftNode {

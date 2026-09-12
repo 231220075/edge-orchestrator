@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! IPC server for the Edge-Cloud Orchestrator.
 //!
 //! Provides a Unix Domain Socket JSON-RPC 2.0 server that bridges

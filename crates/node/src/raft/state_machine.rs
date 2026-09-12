@@ -11,7 +11,7 @@ use eo_core::types::{Hash, NodeDescriptor, NodeId, Role, ScheduledTask, TaskId};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use crate::proposal::{ApplyResult, Proposal};
+use crate::raft::proposal::{ApplyResult, Proposal};
 
 /// The replicated cluster state maintained by the Raft state machine.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

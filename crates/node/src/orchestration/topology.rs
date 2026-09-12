@@ -5,12 +5,12 @@
 
 use std::collections::HashMap;
 
+use crate::raft::Proposal;
 use eo_core::error::Result;
 use eo_core::types::{NodeId, Role};
-use eo_raft::Proposal;
 use serde::Deserialize;
 
-use crate::role_engine::NodeSelector;
+use crate::orchestration::role_engine::NodeSelector;
 
 /// A cluster topology specification (desired state).
 #[derive(Debug, Clone, Deserialize)]

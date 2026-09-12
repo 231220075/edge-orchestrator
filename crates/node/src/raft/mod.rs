@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
 //! Edge-Cloud Orchestrator — Raft Consensus Layer
 //!
 //! Implements distributed consensus using tikv/raft-rs.

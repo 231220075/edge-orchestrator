@@ -24,7 +24,7 @@ pub struct Node {
     #[allow(dead_code)]
     pub object_store: Arc<storage::LocalObjectStore>,
     /// IPC server handle (None if IPC is disabled).
-    pub ipc_handle: Option<eo_ipc::server::IpcServerHandle>,
+    pub ipc_handle: Option<crate::ipc::server::IpcServerHandle>,
 }
 
 impl Node {
@@ -95,10 +95,10 @@ impl Node {
         let raft_node_id = 1;
         let raft_peers = vec![raft_node_id]; // self is the only peer
 
-        let _cas_storage = eo_raft::CasRaftStorage::new(Arc::clone(&object_store));
-        let (transport, _cmd_rx, _msg_tx) = eo_raft::create_raft_transport();
+        let _cas_storage = crate::raft::CasRaftStorage::new(Arc::clone(&object_store));
+        let (transport, _cmd_rx, _msg_tx) = crate::raft::create_raft_transport();
 
-        let mut raft_node = eo_raft::RaftNode::new(raft_node_id, raft_peers.clone(), transport)
+        let mut raft_node = crate::raft::RaftNode::new(raft_node_id, raft_peers.clone(), transport)
             .await
             .context("Failed to create Raft node")?;
 
@@ -118,8 +118,9 @@ impl Node {
 
         // 7. Start IPC server (unless disabled)
         let ipc_handle = if let Some(socket_path) = ipc_socket_path {
-            let ipc_handler = eo_ipc::JsonRpcHandler::new(proposal_tx, Arc::clone(&object_store));
-            let ipc_server = eo_ipc::IpcServer::new(socket_path.to_path_buf(), ipc_handler);
+            let ipc_handler =
+                crate::ipc::JsonRpcHandler::new(proposal_tx, Arc::clone(&object_store));
+            let ipc_server = crate::ipc::IpcServer::new(socket_path.to_path_buf(), ipc_handler);
             let handle = ipc_server.start();
             info!("IPC server listening on {}", socket_path.display());
             Some(handle)

@@ -3,15 +3,15 @@
 //! Manages role assignments across the cluster: applies topology specs,
 //! monitors node health, and triggers failover reassignments.
 
+use crate::raft::Proposal;
 use eo_core::error::Result;
 use eo_core::types::{Capabilities, NodeDescriptor, NodeId, Role};
-use eo_raft::Proposal;
 use serde::Deserialize;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::topology::{diff_topology, ClusterTopologySpec};
+use crate::orchestration::topology::{diff_topology, ClusterTopologySpec};
 
 /// Selector for matching nodes in a topology spec.
 #[derive(Debug, Clone, Deserialize)]

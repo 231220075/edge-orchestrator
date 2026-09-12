@@ -931,47 +931,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "eo-ipc"
-version = "0.1.0"
-dependencies = [
- "base64",
- "bytes",
- "chrono",
- "eo-core",
- "eo-raft",
- "orchestration",
- "sandbox",
- "serde",
- "serde_json",
- "storage",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "eo-raft"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "eo-core",
- "lru",
- "prost 0.11.9",
- "raft",
- "serde",
- "serde_json",
- "slog",
- "storage",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2449,23 +2408,28 @@ name = "node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "clap",
  "eo-core",
- "eo-ipc",
- "eo-raft",
  "libp2p",
- "orchestration",
+ "lru",
  "p2p",
+ "prost 0.11.9",
+ "raft",
  "sandbox",
  "serde",
  "serde_json",
  "serde_yaml",
+ "slog",
  "storage",
+ "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wat",
 ]
 
 [[package]]
@@ -2565,27 +2529,6 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
-
-[[package]]
-name = "orchestration"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "eo-core",
- "eo-raft",
- "p2p",
- "sandbox",
- "serde",
- "serde_json",
- "serde_yaml",
- "storage",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
 
 [[package]]
 name = "p2p"

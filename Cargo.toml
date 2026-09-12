@@ -3,12 +3,9 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/p2p",
-    "crates/raft", # eo-raft crate
     "crates/storage",
     "crates/sandbox",
-    "crates/orchestration",
     "crates/node",
-    "crates/ipc",
 ]
 
 [workspace.package]

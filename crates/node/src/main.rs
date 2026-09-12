@@ -7,6 +7,9 @@
 mod bootstrap;
 mod cli;
 mod config;
+mod ipc;
+mod orchestration;
+mod raft;
 mod signals;
 
 use std::path::PathBuf;
