@@ -16,4 +16,5 @@
 
 ## 诚实边界
 
-- executor_loop 尚未接入 RequestBlob 拉取路径（任务仍走 code_inline 内联）；把 executor 缺失时拉取远程 blob 作为下一步。
+- 任务默认仍走 code_inline 内联；executor 在本地 CAS 缺失时才会通过 blob 协议向 peer 拉取，下一轮重试执行（尽力而为，无复杂重试队列）。
+

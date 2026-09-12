@@ -11,6 +11,7 @@ use eo_core::types::{ExecutionResult, Role, TaskId};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::raft::network::RaftIdRegistry;
 use crate::raft::proposal::Proposal;
 use crate::raft::state_machine::ClusterState;
 
@@ -67,6 +68,8 @@ pub fn spawn_runtime(
     state: Arc<Mutex<ClusterState>>,
     proposal_tx: mpsc::Sender<Proposal>,
     store: Arc<storage::LocalObjectStore>,
+    swarm_commands: mpsc::Sender<p2p::SwarmCommand>,
+    raft_registry: RaftIdRegistry,
 ) {
     let state2 = Arc::clone(&state);
     let tx2 = proposal_tx.clone();
@@ -74,7 +77,15 @@ pub fn spawn_runtime(
         coordinator_loop(self_raft_id, state, proposal_tx).await;
     });
     tokio::spawn(async move {
-        executor_loop(self_raft_id, state2, tx2, store).await;
+        executor_loop(
+            self_raft_id,
+            state2,
+            tx2,
+            store,
+            swarm_commands,
+            raft_registry,
+        )
+        .await;
     });
 }
 
@@ -131,6 +142,8 @@ pub async fn executor_loop(
     state: Arc<Mutex<ClusterState>>,
     proposal_tx: mpsc::Sender<Proposal>,
     store: Arc<storage::LocalObjectStore>,
+    swarm_commands: mpsc::Sender<p2p::SwarmCommand>,
+    raft_registry: RaftIdRegistry,
 ) {
     loop {
         tokio::time::sleep(LOOP_INTERVAL).await;
@@ -150,12 +163,25 @@ pub async fn executor_loop(
                 continue;
             };
 
-            // Fetch code: inline first, else local CAS by hash.
+            // Fetch code: inline first, else local CAS by hash; on a local
+            // miss, request the blob from peers and retry next iteration.
             let code = match &task.code_inline {
                 Some(bytes) => bytes.clone(),
                 None => match store.get_blob(&task.code_hash) {
                     Ok(bytes) => bytes,
                     Err(e) => {
+                        for (rid, pid) in raft_registry.snapshot() {
+                            let _ = swarm_commands
+                                .send(p2p::SwarmCommand::RequestBlob {
+                                    peer_id: pid,
+                                    hash: task.code_hash.clone(),
+                                })
+                                .await;
+                            warn!(
+                                "executor {}: blob {} requested from raft {}",
+                                self_raft_id, task.code_hash, rid
+                            );
+                        }
                         warn!(
                             "executor {}: code {} missing: {}",
                             self_raft_id, task.code_hash, e

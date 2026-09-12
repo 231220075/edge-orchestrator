@@ -184,6 +184,8 @@ impl Node {
                 state_handle,
                 tx.clone(),
                 Arc::clone(&object_store),
+                swarm.commands.clone(),
+                raft_registry.clone(),
             );
 
             tx

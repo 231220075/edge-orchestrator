@@ -46,6 +46,14 @@ impl RaftIdRegistry {
         let guard = self.inner.read().expect("registry poisoned");
         peer_ids.iter().all(|id| guard.contains_key(id))
     }
+
+    /// Snapshot of all current raft_id -> PeerId mappings.
+    pub fn snapshot(&self) -> Vec<(u64, libp2p::PeerId)> {
+        let guard = self.inner.read().expect("registry poisoned");
+        let mut v: Vec<(u64, libp2p::PeerId)> = guard.iter().map(|(k, v)| (*k, *v)).collect();
+        v.sort_by_key(|(k, _)| *k);
+        v
+    }
 }
 
 #[derive(Debug, Clone)]
