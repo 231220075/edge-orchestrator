@@ -203,6 +203,25 @@ impl Default for ResourceLimits {
     }
 }
 
+/// A project-level execution request: a working tree plus build/run commands.
+/// This is what the Linux+KVM (qlean) sandbox consumes, as opposed to the
+/// bytecode-oriented  used by the Wasm sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectSpec {
+    /// Content hash of the project snapshot (a tar blob in CAS).
+    pub snapshot_hash: Hash,
+    /// Working directory inside the sandbox where the project is unpacked.
+    pub work_dir: String,
+    /// Build command with args, e.g. ["cargo", "build", "--release"].
+    pub build_cmd: Vec<String>,
+    /// Run command with args, e.g. ["./target/release/app"].
+    pub run_cmd: Vec<String>,
+    /// Wall-clock timeout for the whole build+run, in milliseconds.
+    pub timeout_ms: u64,
+    /// Resource limits for the sandbox.
+    pub resource_limits: ResourceLimits,
+}
+
 /// Result of executing code in a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionResult {

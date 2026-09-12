@@ -14,3 +14,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 wat = "1"
+
+# qlean is Linux+KVM only; gate it so the workspace still builds on macOS.
+[target.'cfg(target_os = "linux")'.dependencies]
+qlean = "0.3"

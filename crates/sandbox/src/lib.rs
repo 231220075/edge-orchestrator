@@ -5,10 +5,12 @@
 //! - **LinuxContainer**: Namespace+cgroup isolation (Linux only)
 
 pub mod container;
+pub mod qlean;
 pub mod registry;
 pub mod wasm;
 
 // Re-export core traits
-pub use eo_core::traits::Sandbox;
+pub use eo_core::traits::{ProjectSandbox, Sandbox};
+pub use qlean::QleanSandbox;
 pub use registry::{default_registry, SandboxFactory, SandboxRegistry};
 pub use wasm::WasmtimeSandbox;

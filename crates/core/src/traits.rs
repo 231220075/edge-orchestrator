@@ -126,3 +126,12 @@ pub trait Runtime: Send + Sync {
     /// Check whether the runtime is healthy.
     fn is_healthy(&self) -> bool;
 }
+/// A project-level sandbox: takes a working tree + build/run commands and
+/// returns a captured execution result. Used by the Linux+KVM (qlean) backend
+/// as opposed to the bytecode-oriented Sandbox trait (Wasmtime).
+pub trait ProjectSandbox: Send + Sync {
+    fn run_project(
+        &self,
+        spec: crate::types::ProjectSpec,
+    ) -> crate::error::Result<crate::types::ExecutionResult>;
+}
