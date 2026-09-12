@@ -1,47 +1,43 @@
-# Edge-Cloud Orchestrator
+# Edge-Cloud Orchestrator (v3)
 
-A production-quality distributed orchestration platform built in Rust.
+A lightweight distributed edge orchestration platform in Rust.
+
+Three highlights:
+1. Real distributed consensus - Raft over libp2p, kill-leader re-election.
+2. Verifiable sandbox - Wasmtime StoreLimits + epoch interruption.
+3. Content-addressed storage - Git-model CAS dedup.
 
 ## Architecture
 
-- **Control Plane**: Raft consensus (tikv/raft-rs) maintaining cluster state
-- **P2P Mesh**: libp2p with mDNS discovery, Noise encryption, Yamux multiplexing
-- **Sandbox Layer**: Polymorphic execution environment (Wasmtime + Linux containers)
-- **Storage**: Git-model content-addressed storage with P2P distribution
+- Control plane: tikv/raft-rs RawNode, static 3-node cluster over libp2p.
+- Data plane: Git-model CAS store.
+- Execution: Sandbox trait; Wasmtime (real limits) + container (honest stub).
+- Single binary node + JSON-RPC over UDS.
 
-## Quick Start
+## Quick start
 
 ```bash
-# Build everything
 cargo build --workspace
-
-# Run tests
 cargo test --workspace
-
-# Start a node
-cargo run -p node -- --config configs/node.yaml
+./scripts/integration_3node_test.sh
 ```
 
-## Crate Structure
+## Crates
 
 | Crate | Purpose |
-|-------|---------|
-| `core` | Shared types, traits, error definitions |
-| `p2p` | libp2p network layer (mDNS, TCP, Noise) |
-| `raft` | Raft consensus integration |
-| `storage` | Git-model content-addressed storage |
-| `sandbox` | Polymorphic sandbox (Wasmtime + containers) |
-| `orchestration` | Role engine, scheduler, topology |
-| `node` | Binary: the node process |
+|---|---|
+| core | types, traits, errors |
+| p2p | libp2p network |
+| sandbox | Wasmtime sandbox |
+| storage | Git-model CAS |
+| node | binary; raft/orchestration/ipc internal |
 
-## Development
+## Docs
 
-- Rust stable (see `rust-toolchain.toml`)
-- `cargo build --workspace` — zero warnings
-- `cargo test --workspace` — all tests pass
-- `cargo clippy --workspace -- -D warnings` — clean
-- `cargo fmt --all -- --check` — formatted
+- docs/v3-modules/ per-module records
+- plan-v2/06-v3重构总方案.md final plan
 
-## License
+## Dev
 
-MIT OR Apache-2.0
+- cargo clippy --workspace --all-targets -- -D warnings (clean)
+- cargo fmt --all -- --check (clean)
