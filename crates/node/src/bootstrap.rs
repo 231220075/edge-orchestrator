@@ -41,10 +41,19 @@ impl Node {
             config.node_type, config.listen_addresses
         );
 
-        // 2. Generate identity keypair
-        let keypair = identity::Keypair::generate_ed25519();
+        // 2. Identity: deterministic seed if provided, else fresh ed25519.
+        let keypair = match &config.identity_seed {
+            Some(hex_seed) => {
+                let bytes =
+                    hex::decode(hex_seed).with_context(|| "identity_seed must be hex-encoded")?;
+                let secret = libp2p::identity::ed25519::SecretKey::try_from_bytes(bytes)
+                    .map_err(|e| anyhow::anyhow!("bad identity_seed: {e}"))?;
+                identity::Keypair::from(libp2p::identity::ed25519::Keypair::from(secret))
+            }
+            None => identity::Keypair::generate_ed25519(),
+        };
         let peer_id = keypair.public().to_peer_id();
-        info!("Generated identity: peer_id={}", peer_id);
+        info!("Identity ready: peer_id={}", peer_id);
 
         // 3. Build descriptor (raft_id comes from config)
         let descriptor = config.to_descriptor();
@@ -147,9 +156,18 @@ impl Node {
 
         loop {
             match self.swarm.events.recv().await {
-                Some(Event::PeerDiscovered { peer_id }) => {
-                    info!("mDNS: discovered peer {}", peer_id);
-                    // Learn the peer's raft_id by fetching its descriptor.
+                Some(Event::PeerDiscovered { peer_id, address }) => {
+                    info!("mDNS: discovered peer {} at {}", peer_id, address);
+                    // Establish a connection; descriptor request happens on
+                    // PeerConnected once dialing has finished.
+                    let _ = self
+                        .swarm
+                        .commands
+                        .send(p2p::SwarmCommand::Dial { addr: address })
+                        .await;
+                }
+                Some(Event::PeerConnected { peer_id }) => {
+                    info!("Connected to peer {}", peer_id);
                     let _ = self
                         .swarm
                         .commands

@@ -49,6 +49,12 @@ pub struct NodeConfig {
     /// Every raft voter must use the SAME list (e.g. [1, 2, 3]).
     #[serde(default)]
     pub raft_peers: Vec<u64>,
+
+    /// Optional 32-byte hex seed for a deterministic libp2p identity. When
+    /// set, the node's PeerId is stable across restarts, which enables fixed
+    /// bootstrap addresses in integration tests and production setups.
+    #[serde(default)]
+    pub identity_seed: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

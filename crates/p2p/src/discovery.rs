@@ -12,10 +12,12 @@ use libp2p::PeerId;
 /// by [`new_swarm`](crate::swarm::new_swarm).
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// A new peer was discovered via mDNS.
+    /// A new peer was discovered via mDNS, with its advertised address.
     PeerDiscovered {
         /// The libp2p [`PeerId`] of the discovered peer.
         peer_id: PeerId,
+        /// The address this peer advertised.
+        address: libp2p::Multiaddr,
     },
 
     /// A previously discovered peer has expired (mDNS TTL elapsed).
@@ -54,6 +56,13 @@ pub enum Event {
 
     /// Connection closed with a peer.
     ConnectionClosed {
+        /// The peer.
+        peer_id: PeerId,
+    },
+
+    /// Outbound or inbound connection has been established with a peer.
+    /// This is the safe point to send request-response requests.
+    PeerConnected {
         /// The peer.
         peer_id: PeerId,
     },

@@ -1,0 +1,25 @@
+node_id: ""
+node_type: "Heavy"
+
+listen_addresses:
+  - "/ip4/127.0.0.1/tcp/39001"
+
+bootstrap_peers:
+  - "/ip4/127.0.0.1/tcp/39002/p2p/12D3KooWHdiAxVd8uMQR1hGWXccidmfCwLqcMpGwR6QcTP6QRMuD"
+  - "/ip4/127.0.0.1/tcp/39003/p2p/12D3KooWSCufgHzV4fCwRijfH2k3abrpAJxTKxEvN1FDuRXA2U9x"
+
+capabilities:
+  storage: true
+  gpu_acceleration: false
+  runtimes:
+    - "Wasm"
+  max_memory_mb: 4096
+  cpu_cores: 2
+
+roles:
+  - "Execution"
+  - "Coordinator"
+
+raft_id: 1
+raft_peers: [1, 2, 3]
+identity_seed: "0000000000000000000000000000000000000000000000000000000000000001"

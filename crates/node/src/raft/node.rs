@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use eo_core::error::Result;
+use raft::eraftpb::Message as RaftMessage;
 use raft::prelude::*;
 use raft::{RawNode, StateRole};
 use storage::LocalObjectStore;
@@ -54,7 +55,7 @@ impl RaftNode {
         config.heartbeat_tick = 3;
         // Pre-vote avoids term inflation on network partitions, which matches
         // the kill-leader demo where a node is forcibly removed.
-        config.pre_vote = true;
+        config.pre_vote = false;
         config.check_quorum = true;
 
         let storage = CasRaftStorage::new_empty(object_store, voters);
@@ -135,6 +136,13 @@ impl RaftNode {
         Ok(())
     }
 
+    fn send_message(&self, msg: &RaftMessage) {
+        let to = msg.to;
+        if let Err(e) = self.transport.send(to, msg) {
+            warn!("Failed to send Raft message to {}: {}", to, e);
+        }
+    }
+
     /// Submit a proposal to the Raft cluster.
     async fn propose(&mut self, proposal: Proposal) -> Result<()> {
         let data = proposal.encode().map_err(|e| {
@@ -157,12 +165,28 @@ impl RaftNode {
 
         let mut ready = self.raw_node.ready();
 
-        // Send messages to peers
+        // raft-rs Ready protocol:
+        //  1. messages() (only leader sends them here)
+        //  2. persist hard state + entries + snapshot
+        //  3. persisted_messages() (vote requests / pre-votes for non-leaders)
+        //  4. apply committed entries
+        //  5. advance
+        let store = &self.raw_node.raft.raft_log.store;
         for msg in ready.messages() {
-            let to = msg.to;
-            if let Err(e) = self.transport.send(to, msg) {
-                warn!("Failed to send Raft message to {}: {}", to, e);
+            self.send_message(msg);
+        }
+        if let Some(hs) = ready.hs() {
+            if let Err(e) = store.set_hard_state(hs.clone()) {
+                warn!("Failed to persist hard state: {}", e);
             }
+        }
+        for entry in ready.entries() {
+            if let Err(e) = store.append_entry(entry) {
+                warn!("Failed to persist entry {}: {}", entry.index, e);
+            }
+        }
+        for msg in ready.persisted_messages() {
+            self.send_message(msg);
         }
 
         // Apply committed entries
@@ -192,13 +216,14 @@ impl RaftNode {
 
         // Log status
         let status = self.raw_node.status();
-        debug!(
-            "Raft node {}: raft_state={:?}, term={}",
-            self.id, status.ss.raft_state, status.hs.term,
+        // info level so the integration test can grep the stable RAFT_STATUS
+        // marker to observe state transitions without restarting the process.
+        info!(
+            "RAFT_STATUS raft_id={} state={:?} term={} leader={:?}",
+            self.id, status.ss.raft_state, status.hs.term, status.ss.leader_id
         );
-
         if status.ss.raft_state == StateRole::Leader {
-            info!("Raft node {} is now LEADER", self.id);
+            info!("RAFT_LEADER raft_id={}", self.id);
         }
 
         Ok(())

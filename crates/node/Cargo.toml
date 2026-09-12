@@ -26,6 +26,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 libp2p = { version = "0.54", features = ["ed25519"] }
 base64 = "0.22"
+hex = "0.4"
 
 # raft-rs (moved from eo-raft crate)
 raft = { version = "0.7", package = "raft", default-features = false, features = ["prost-codec"] }
