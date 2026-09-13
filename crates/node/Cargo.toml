@@ -27,6 +27,8 @@ chrono = { version = "0.4", features = ["serde"] }
 libp2p = { version = "0.54", features = ["ed25519"] }
 base64 = "0.22"
 tar = "0.4"
+async-trait = "0.1"
+tempfile = "3"
 hex = "0.4"
 
 # raft-rs (moved from eo-raft crate)
@@ -37,7 +39,6 @@ thiserror.workspace = true
 lru = "0.12"
 
 [dev-dependencies]
-tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 wat = "1"
 # for submit_task example only
