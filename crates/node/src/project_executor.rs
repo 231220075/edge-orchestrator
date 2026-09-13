@@ -81,4 +81,5 @@ impl p2p::ProjectExecutor for QleanProjectExecutor {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unused_imports)]
 pub use imp::QleanProjectExecutor;
