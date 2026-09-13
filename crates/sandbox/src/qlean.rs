@@ -18,17 +18,19 @@ mod linux {
     }
 
     impl QleanSandbox {
-        pub fn new() -> Result<Self> {
+        pub async fn new() -> Result<Self> {
+            let image = qlean::Image::new(qlean::ImageConfig::default())
+                .await
+                .map_err(|e| CoreError::SandboxExecution(format!("qlean image: {e}")))?;
             Ok(Self {
-                image: qlean::Image::new(qlean::ImageConfig::default())
-                    .map_err(|e| CoreError::SandboxExecution(format!("qlean image: {e}")))?,
+                image,
                 config: qlean::MachineConfig::default(),
             })
         }
     }
 
     impl ProjectSandbox for QleanSandbox {
-        fn run_project(&self, spec: ProjectSpec) -> Result<ExecutionResult> {
+        async fn run_project(&self, spec: ProjectSpec) -> Result<ExecutionResult> {
             let start = Instant::now();
             let mut out = ExecutionResult {
                 exit_code: 0,
@@ -106,7 +108,7 @@ mod linux {
 pub struct QleanSandbox;
 #[cfg(not(target_os = "linux"))]
 impl ProjectSandbox for QleanSandbox {
-    fn run_project(&self, _spec: ProjectSpec) -> Result<ExecutionResult> {
+    async fn run_project(&self, _spec: ProjectSpec) -> Result<ExecutionResult> {
         Err(CoreError::UnsupportedPlatform(
             "Qlean sandbox requires a Linux host with KVM".into(),
         ))
