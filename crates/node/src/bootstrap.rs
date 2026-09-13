@@ -59,8 +59,10 @@ pub struct Node {
     peer_addrs: std::collections::HashMap<libp2p::PeerId, libp2p::Multiaddr>,
     /// Configured bootstrap peers, re-dialed periodically to form a mesh.
     bootstrap_addrs: Vec<libp2p::Multiaddr>,
-    /// Master-side project submitter (present on cluster members).
-    project_client: Option<Arc<crate::project_client::ProjectClient>>,
+    /// Master-side project submitter (cluster members and light clients).
+    project_client: Arc<crate::project_client::ProjectClient>,
+    /// peer_id -> descriptor, learned over the mesh (light-client topology).
+    known_peers: Arc<Mutex<HashMap<libp2p::PeerId, NodeDescriptor>>>,
 }
 
 impl Node {
@@ -215,27 +217,33 @@ impl Node {
             (tx, Some(state_handle))
         };
 
-        // 6b. Master-side project client: routes ProjectTask to capable
-        // executors and tracks returned results. Only cluster members (with
-        // replicated state) can resolve executors, so light clients get None.
+        // 6b. Master-side project client. Cluster members resolve executors
+        // from Raft state; light clients (no raft_id) resolve them from peer
+        // descriptors learned over the mesh.
         let project_results: Arc<Mutex<HashMap<TaskId, ProjectResult>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let project_client = state_handle_opt.map(|st| {
-            Arc::new(crate::project_client::ProjectClient::new(
-                swarm.commands.clone(),
-                raft_registry.clone(),
-                st,
-                Arc::clone(&project_results),
-                descriptor.node_id,
-            ))
-        });
+        let known_peers: Arc<Mutex<HashMap<libp2p::PeerId, NodeDescriptor>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let catalog = match state_handle_opt {
+            Some(st) => crate::project_client::Catalog::Raft {
+                state: st,
+                registry: raft_registry.clone(),
+            },
+            None => crate::project_client::Catalog::Peers(Arc::clone(&known_peers)),
+        };
+        let project_client = Arc::new(crate::project_client::ProjectClient::new(
+            swarm.commands.clone(),
+            catalog,
+            Arc::clone(&project_results),
+            descriptor.node_id,
+        ));
 
         // 7. Start IPC server
         let ipc_handle = if let Some(socket_path) = ipc_socket_path {
             let ipc_handler = crate::ipc::JsonRpcHandler::new(
                 proposal_tx,
                 Arc::clone(&object_store),
-                project_client.clone(),
+                Some(Arc::clone(&project_client)),
             );
             let ipc_server = crate::ipc::IpcServer::new(socket_path.to_path_buf(), ipc_handler);
             let handle = ipc_server.start();
@@ -256,6 +264,7 @@ impl Node {
             peer_addrs: HashMap::new(),
             bootstrap_addrs,
             project_client,
+            known_peers,
         })
     }
 
@@ -316,6 +325,11 @@ impl Node {
                         self.raft_registry.insert(raft_id, peer_id);
                         info!("Mapped raft id {} -> peer {}", raft_id, peer_id);
                     }
+                    // Light-client topology: remember peer descriptors so the
+                    // project client can resolve a capable executor.
+                    if let Ok(mut peers) = self.known_peers.lock() {
+                        peers.insert(peer_id, descriptor);
+                    }
                 }
                 Some(Event::BlobRequestReceived { peer_id, hash }) => {
                     // Swarm already answered with the provider; here we just
@@ -346,9 +360,7 @@ impl Node {
                         "project result {} from {} exit={}",
                         result.task_id, peer_id, result.exit_code
                     );
-                    if let Some(pc) = &self.project_client {
-                        pc.record_result(result);
-                    }
+                    self.project_client.record_result(result);
                 }
                 Some(Event::RaftMessageReceived { peer_id, data }) => {
                     debug!("Got raft bytes from {}", peer_id);

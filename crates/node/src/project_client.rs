@@ -6,17 +6,29 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use eo_core::error::{CoreError, Result};
-use eo_core::types::{NodeId, ProjectResult, ProjectTask, ResourceLimits, TaskId};
+use eo_core::types::{NodeDescriptor, NodeId, ProjectResult, ProjectTask, ResourceLimits, TaskId};
 use tokio::sync::mpsc;
 
 use crate::project_snapshot::snapshot_from_dir;
 use crate::raft::network::RaftIdRegistry;
 use crate::raft::state_machine::ClusterState;
 
+/// How a master resolves a target node to a libp2p PeerId.
+pub enum Catalog {
+    /// Full cluster member: topology from Raft state (node_id -> raft_id) plus
+    /// the raft_id -> PeerId registry.
+    Raft {
+        state: Arc<Mutex<ClusterState>>,
+        registry: RaftIdRegistry,
+    },
+    /// Light client (not a Raft member): topology learned from peer
+    /// descriptors exchanged over the mesh (peer_id -> descriptor).
+    Peers(Arc<Mutex<HashMap<libp2p::PeerId, NodeDescriptor>>>),
+}
+
 pub struct ProjectClient {
     swarm_commands: mpsc::Sender<p2p::SwarmCommand>,
-    registry: RaftIdRegistry,
-    state: Arc<Mutex<ClusterState>>,
+    catalog: Catalog,
     results: Arc<Mutex<HashMap<TaskId, ProjectResult>>>,
     self_node_id: NodeId,
 }
@@ -24,54 +36,71 @@ pub struct ProjectClient {
 impl ProjectClient {
     pub fn new(
         swarm_commands: mpsc::Sender<p2p::SwarmCommand>,
-        registry: RaftIdRegistry,
-        state: Arc<Mutex<ClusterState>>,
+        catalog: Catalog,
         results: Arc<Mutex<HashMap<TaskId, ProjectResult>>>,
         self_node_id: NodeId,
     ) -> Self {
         Self {
             swarm_commands,
-            registry,
-            state,
+            catalog,
             results,
             self_node_id,
         }
     }
 
     fn resolve_peer(&self, target: Option<NodeId>) -> Result<libp2p::PeerId> {
-        let (raft_id, chosen) = {
-            let state = self.state.lock().map_err(|_| poisoned())?;
-            let node = match target {
-                Some(id) => state
-                    .nodes
-                    .get(&id)
-                    .ok_or_else(|| CoreError::InvalidState(format!("unknown target node {id}")))?,
-                None => {
-                    // Deterministic pick: capable remote node with the smallest
-                    // raft_id. Stable routing keeps a warm VM reused across
-                    // successive submissions.
-                    let self_id = self.self_node_id;
-                    let mut candidates: Vec<&eo_core::types::NodeDescriptor> = state
-                        .nodes
-                        .values()
-                        .filter(|d| d.capabilities.project_sandbox && d.node_id != self_id)
-                        .collect();
-                    candidates.sort_by_key(|d| d.raft_id);
-                    *candidates.first().ok_or_else(|| {
-                        CoreError::InvalidState(
-                            "no remote node with project_sandbox capability".into(),
-                        )
-                    })?
-                }
-            };
-            let rid = node
-                .raft_id
-                .ok_or_else(|| CoreError::InvalidState("target node has no raft_id".into()))?;
-            (rid, node.node_id)
-        };
-        self.registry.get(raft_id).ok_or_else(|| {
-            CoreError::Network(format!("no PeerId for raft id {raft_id} (node {chosen})"))
-        })
+        let self_id = self.self_node_id;
+        match &self.catalog {
+            Catalog::Raft { state, registry } => {
+                let (raft_id, chosen) = {
+                    let state = state.lock().map_err(|_| poisoned())?;
+                    let node = match target {
+                        Some(id) => state.nodes.get(&id).ok_or_else(|| {
+                            CoreError::InvalidState(format!("unknown target node {id}"))
+                        })?,
+                        None => {
+                            let mut c: Vec<&NodeDescriptor> = state
+                                .nodes
+                                .values()
+                                .filter(|d| d.capabilities.project_sandbox && d.node_id != self_id)
+                                .collect();
+                            c.sort_by_key(|d| d.raft_id);
+                            *c.first().ok_or_else(|| {
+                                CoreError::InvalidState(
+                                    "no remote node with project_sandbox capability".into(),
+                                )
+                            })?
+                        }
+                    };
+                    let rid = node.raft_id.ok_or_else(|| {
+                        CoreError::InvalidState("target node has no raft_id".into())
+                    })?;
+                    (rid, node.node_id)
+                };
+                registry.get(raft_id).ok_or_else(|| {
+                    CoreError::Network(format!("no PeerId for raft id {raft_id} (node {chosen})"))
+                })
+            }
+            Catalog::Peers(peers) => {
+                let peers = peers.lock().map_err(|_| poisoned())?;
+                let pick = match target {
+                    Some(id) => peers.iter().find(|(_, d)| d.node_id == id).map(|(p, _)| *p),
+                    None => {
+                        let mut c: Vec<(&libp2p::PeerId, &NodeDescriptor)> = peers
+                            .iter()
+                            .filter(|(_, d)| d.capabilities.project_sandbox && d.node_id != self_id)
+                            .collect();
+                        c.sort_by_key(|(_, d)| d.raft_id);
+                        c.first().map(|(p, _)| **p)
+                    }
+                };
+                pick.ok_or_else(|| {
+                    CoreError::InvalidState(
+                        "no reachable node with project_sandbox capability".into(),
+                    )
+                })
+            }
+        }
     }
 
     /// Pack a local directory and send a ProjectTask to a capable executor.
@@ -156,8 +185,10 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         ProjectClient::new(
             tx,
-            registry,
-            Arc::new(Mutex::new(state)),
+            Catalog::Raft {
+                state: Arc::new(Mutex::new(state)),
+                registry,
+            },
             Arc::new(Mutex::new(HashMap::new())),
             self_id,
         )
@@ -197,8 +228,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let c = ProjectClient::new(
             tx,
-            registry,
-            Arc::new(Mutex::new(state)),
+            Catalog::Raft {
+                state: Arc::new(Mutex::new(state)),
+                registry,
+            },
             Arc::new(Mutex::new(HashMap::new())),
             uuid::Uuid::new_v4(),
         );
@@ -236,5 +269,21 @@ mod tests {
         registry.insert(9, peer());
         let c = client(state, registry, uuid::Uuid::new_v4());
         assert_eq!(c.resolve_peer(None).unwrap(), pid_small);
+    }
+    #[test]
+    fn peers_catalog_resolves_from_descriptors() {
+        let mut peers = HashMap::new();
+        let pid = peer();
+        let nid = uuid::Uuid::new_v4();
+        peers.insert(pid, make_node(nid, 1, true));
+        let (tx, _rx) = mpsc::channel(4);
+        let c = ProjectClient::new(
+            tx,
+            Catalog::Peers(Arc::new(Mutex::new(peers))),
+            Arc::new(Mutex::new(HashMap::new())),
+            uuid::Uuid::new_v4(),
+        );
+        assert_eq!(c.resolve_peer(None).unwrap(), pid);
+        assert_eq!(c.resolve_peer(Some(nid)).unwrap(), pid);
     }
 }
