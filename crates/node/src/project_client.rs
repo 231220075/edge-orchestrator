@@ -47,16 +47,21 @@ impl ProjectClient {
                     .get(&id)
                     .ok_or_else(|| CoreError::InvalidState(format!("unknown target node {id}")))?,
                 None => {
+                    // Deterministic pick: capable remote node with the smallest
+                    // raft_id. Stable routing keeps a warm VM reused across
+                    // successive submissions.
                     let self_id = self.self_node_id;
-                    state
+                    let mut candidates: Vec<&eo_core::types::NodeDescriptor> = state
                         .nodes
                         .values()
-                        .find(|d| d.capabilities.project_sandbox && d.node_id != self_id)
-                        .ok_or_else(|| {
-                            CoreError::InvalidState(
-                                "no remote node with project_sandbox capability".into(),
-                            )
-                        })?
+                        .filter(|d| d.capabilities.project_sandbox && d.node_id != self_id)
+                        .collect();
+                    candidates.sort_by_key(|d| d.raft_id);
+                    *candidates.first().ok_or_else(|| {
+                        CoreError::InvalidState(
+                            "no remote node with project_sandbox capability".into(),
+                        )
+                    })?
                 }
             };
             let rid = node
@@ -216,5 +221,20 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_peer_is_deterministic_by_raft_id() {
+        let mut state = ClusterState::default();
+        let n_large = uuid::Uuid::new_v4();
+        let n_small = uuid::Uuid::new_v4();
+        state.nodes.insert(n_large, make_node(n_large, 9, true));
+        state.nodes.insert(n_small, make_node(n_small, 2, true));
+        let registry = RaftIdRegistry::new();
+        let pid_small = peer();
+        registry.insert(2, pid_small);
+        registry.insert(9, peer());
+        let c = client(state, registry, uuid::Uuid::new_v4());
+        assert_eq!(c.resolve_peer(None).unwrap(), pid_small);
     }
 }

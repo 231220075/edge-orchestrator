@@ -21,9 +21,14 @@ for i in 1 2 3; do
 done
 sleep 12
 
-echo "[3/4] submit project (first run installs gcc in the guest; may take minutes)"
 PROJ=scripts/qlean-project-demo/testproj
-./target/debug/examples/submit_project /tmp/eo-proj/n1.sock "$PROJ" "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc && gcc main.c -o app" "./app"
+BUILD="(command -v gcc >/dev/null 2>&1 || (DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc)) && gcc main.c -o app"
+
+echo "[3/4] submit #1 (cold: boots the VM, first run installs gcc)"
+./target/debug/examples/submit_project /tmp/eo-proj/n1.sock "$PROJ" "$BUILD" "./app"
+
+echo "[3b/4] submit #2 (warm: reuses the booted VM)"
+./target/debug/examples/submit_project /tmp/eo-proj/n1.sock "$PROJ" "$BUILD" "./app"
 
 echo "[4/4] evidence"
 grep -h "project result" /tmp/eo-proj/n1.log /tmp/eo-proj/n2.log /tmp/eo-proj/n3.log | tail -3 || true
