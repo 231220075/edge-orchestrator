@@ -33,9 +33,11 @@ async fn run() -> Result<()> {
             // qlean mirrors dir into remote_path/basename; upload to parent
             vm.upload(upload_src.as_str(), "/root").await?;
 
-            let build = vm.exec("cd /root/testproj && make").await?;
+            // default cloud image has no toolchain; install gcc first
+            let _ = vm.exec("apt-get update -qq && apt-get install -y -qq gcc").await?;
+            let build = vm.exec("cd /root/testproj && gcc main.c -o app").await?;
             if !build.status.success() {
-                bail!("make failed: {}", String::from_utf8_lossy(&build.stderr));
+                bail!("gcc failed: {}", String::from_utf8_lossy(&build.stderr));
             }
 
             let run = vm.exec("cd /root/testproj && ./app").await?;
