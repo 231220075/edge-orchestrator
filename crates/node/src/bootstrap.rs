@@ -1,10 +1,11 @@
 //! Startup sequence for the edge-orchestrator node.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use eo_core::types::NodeDescriptor;
+use eo_core::types::{NodeDescriptor, NodeId, ProjectResult, TaskId};
 use libp2p::identity;
 use p2p::{new_swarm, Event, SwarmConfig, SwarmHandle};
 use tracing::{debug, info, warn};
@@ -24,6 +25,26 @@ impl p2p::BlobProvider for CasBlobProvider {
     }
 }
 
+/// Build a project executor. Only Linux+KVM nodes can actually run projects,
+/// so non-Linux nodes return None (they never accept project tasks).
+#[cfg(target_os = "linux")]
+fn make_project_executor(node_id: NodeId) -> Option<Arc<dyn p2p::ProjectExecutor>> {
+    match sandbox::QleanSandbox::new() {
+        Ok(sb) => Some(Arc::new(
+            crate::project_executor::QleanProjectExecutor::new(Arc::new(sb), node_id),
+        )),
+        Err(e) => {
+            warn!("qlean sandbox unavailable, projects disabled: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn make_project_executor(_node_id: NodeId) -> Option<Arc<dyn p2p::ProjectExecutor>> {
+    None
+}
+
 pub struct Node {
     pub descriptor: NodeDescriptor,
     pub swarm: SwarmHandle,
@@ -38,6 +59,8 @@ pub struct Node {
     peer_addrs: std::collections::HashMap<libp2p::PeerId, libp2p::Multiaddr>,
     /// Configured bootstrap peers, re-dialed periodically to form a mesh.
     bootstrap_addrs: Vec<libp2p::Multiaddr>,
+    /// Master-side project submitter (present on cluster members).
+    project_client: Option<Arc<crate::project_client::ProjectClient>>,
 }
 
 impl Node {
@@ -112,7 +135,7 @@ impl Node {
             swarm_config,
             descriptor.clone(),
             Some(blob_provider),
-            None, // Phase 2 executor wiring lands in the next commit
+            make_project_executor(descriptor.node_id),
         )
         .context("Failed to start P2P swarm")?;
         info!("P2P swarm started successfully");
@@ -127,9 +150,9 @@ impl Node {
             crate::raft::network::create_raft_transport(swarm.commands.clone());
         let raft_registry = transport.registry().clone();
 
-        let proposal_tx = if raft_id == 0 {
+        let (proposal_tx, state_handle_opt) = if raft_id == 0 {
             let (tx, _rx) = tokio::sync::mpsc::channel(1);
-            tx
+            (tx, None)
         } else {
             let mut raft_node = crate::raft::RaftNode::new(
                 raft_id,
@@ -182,20 +205,37 @@ impl Node {
             // (only runs tasks assigned to itself). Both read replicated state.
             crate::orchestration::runtime_loop::spawn_runtime(
                 raft_id,
-                state_handle,
+                state_handle.clone(),
                 tx.clone(),
                 Arc::clone(&object_store),
                 swarm.commands.clone(),
                 raft_registry.clone(),
             );
 
-            tx
+            (tx, Some(state_handle))
         };
+
+        // 6b. Master-side project client: routes ProjectTask to capable
+        // executors and tracks returned results. Only cluster members (with
+        // replicated state) can resolve executors, so light clients get None.
+        let project_results: Arc<Mutex<HashMap<TaskId, ProjectResult>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let project_client = state_handle_opt.map(|st| {
+            Arc::new(crate::project_client::ProjectClient::new(
+                swarm.commands.clone(),
+                raft_registry.clone(),
+                st,
+                Arc::clone(&project_results),
+            ))
+        });
 
         // 7. Start IPC server
         let ipc_handle = if let Some(socket_path) = ipc_socket_path {
-            let ipc_handler =
-                crate::ipc::JsonRpcHandler::new(proposal_tx, Arc::clone(&object_store));
+            let ipc_handler = crate::ipc::JsonRpcHandler::new(
+                proposal_tx,
+                Arc::clone(&object_store),
+                project_client.clone(),
+            );
             let ipc_server = crate::ipc::IpcServer::new(socket_path.to_path_buf(), ipc_handler);
             let handle = ipc_server.start();
             info!("IPC server listening on {}", socket_path.display());
@@ -212,8 +252,9 @@ impl Node {
             ipc_handle,
             raft_incoming: incoming_tx,
             raft_registry,
-            peer_addrs: std::collections::HashMap::new(),
+            peer_addrs: HashMap::new(),
             bootstrap_addrs,
+            project_client,
         })
     }
 
@@ -292,10 +333,21 @@ impl Node {
                     }
                 }
                 Some(Event::ProjectTaskReceived { peer_id, task }) => {
-                    info!("project task {} received from {} (Phase 2: executor wiring pending)", task.task_id, peer_id);
+                    // Swarm already ran the executor and replied; this is
+                    // observability on the serving node.
+                    info!(
+                        "project task {} received from {}",
+                        task.task_id, peer_id
+                    );
                 }
                 Some(Event::ProjectResultReceived { peer_id, result }) => {
-                    info!("project result {} from {} exit={}", result.task_id, peer_id, result.exit_code);
+                    info!(
+                        "project result {} from {} exit={}",
+                        result.task_id, peer_id, result.exit_code
+                    );
+                    if let Some(pc) = &self.project_client {
+                        pc.record_result(result);
+                    }
                 }
                 Some(Event::RaftMessageReceived { peer_id, data }) => {
                     debug!("Got raft bytes from {}", peer_id);

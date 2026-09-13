@@ -15,6 +15,7 @@ capabilities:
     - "Wasm"
   max_memory_mb: 4096
   cpu_cores: 2
+  project_sandbox: true
 
 roles:
   - "Execution"

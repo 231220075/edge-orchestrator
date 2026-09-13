@@ -10,6 +10,8 @@ use eo_core::types::{ResourceLimits, RoutingStrategy, ScheduledTask};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use storage::LocalObjectStore;
+
+use crate::project_client::ProjectClient;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -85,6 +87,9 @@ pub struct JsonRpcHandler {
 
     /// Total tasks completed (monotonically increasing counter).
     pub tasks_completed: std::sync::atomic::AtomicU64,
+
+    /// Master-side project submitter (None on nodes without cluster state).
+    pub project_client: Option<Arc<ProjectClient>>,
 }
 
 impl JsonRpcHandler {
@@ -92,11 +97,13 @@ impl JsonRpcHandler {
     pub fn new(
         raft_proposal_tx: mpsc::Sender<Proposal>,
         object_store: Arc<LocalObjectStore>,
+        project_client: Option<Arc<ProjectClient>>,
     ) -> Self {
         Self {
             raft_proposal_tx,
             object_store,
             tasks_completed: std::sync::atomic::AtomicU64::new(0),
+            project_client,
         }
     }
 
@@ -108,6 +115,8 @@ impl JsonRpcHandler {
             "get_cluster_topology" => self.get_cluster_topology().await,
             "submit_to_cas_and_raft" => self.submit_to_cas_and_raft(request.params).await,
             "fetch_execution_result" => self.fetch_execution_result(request.params).await,
+            "submit_project" => self.submit_project(request.params).await,
+            "fetch_project_result" => self.fetch_project_result(request.params).await,
             unknown => Err(json_rpc_error(
                 -32601,
                 format!("Method not found: {unknown}"),
@@ -259,9 +268,98 @@ impl JsonRpcHandler {
             "peak_memory_bytes": result.peak_memory_bytes,
         }))
     }
+    // ── Project submission ────────────────────────────────────────────
+
+    async fn submit_project(&self, params: Value) -> Result<Value, JsonRpcErrorPayload> {
+        #[derive(Deserialize)]
+        struct SubmitProjectParams {
+            project_dir: String,
+            #[serde(default = "default_project_work_dir")]
+            work_dir: String,
+            #[serde(default)]
+            build_cmd: Vec<String>,
+            #[serde(default)]
+            run_cmd: Vec<String>,
+            #[serde(default = "default_timeout")]
+            timeout_ms: u64,
+            #[serde(default)]
+            target_node: Option<String>,
+        }
+
+        let p: SubmitProjectParams = serde_json::from_value(params)
+            .map_err(|e| json_rpc_error(-32602, format!("Invalid params: {e}")))?;
+
+        let client = self.project_client.as_ref().ok_or_else(|| {
+            json_rpc_error(
+                -32010,
+                "node has no cluster state; cannot submit projects".into(),
+            )
+        })?;
+
+        let target = match p.target_node {
+            Some(s) => Some(
+                uuid::Uuid::parse_str(&s)
+                    .map_err(|e| json_rpc_error(-32602, format!("invalid target_node: {e}")))?,
+            ),
+            None => None,
+        };
+
+        let task_id = client
+            .submit_local_project(
+                &p.project_dir,
+                &p.work_dir,
+                p.build_cmd,
+                p.run_cmd,
+                p.timeout_ms,
+                target,
+            )
+            .await
+            .map_err(|e| json_rpc_error(-32011, format!("submit project failed: {e}")))?;
+
+        Ok(serde_json::json!({ "task_id": task_id.to_string() }))
+    }
+
+    async fn fetch_project_result(&self, params: Value) -> Result<Value, JsonRpcErrorPayload> {
+        #[derive(Deserialize)]
+        struct FetchProjectParams {
+            task_id: String,
+        }
+
+        let p: FetchProjectParams = serde_json::from_value(params)
+            .map_err(|e| json_rpc_error(-32602, format!("Invalid params: {e}")))?;
+
+        let client = self
+            .project_client
+            .as_ref()
+            .ok_or_else(|| json_rpc_error(-32010, "node has no cluster state".into()))?;
+
+        let task_id = uuid::Uuid::parse_str(&p.task_id)
+            .map_err(|e| json_rpc_error(-32602, format!("invalid task_id: {e}")))?;
+
+        match client.get_result(&task_id) {
+            Some(r) => {
+                use base64::Engine;
+                let stdout = base64::engine::general_purpose::STANDARD.encode(&r.stdout);
+                let stderr = base64::engine::general_purpose::STANDARD.encode(&r.stderr);
+                Ok(serde_json::json!({
+                    "status": "completed",
+                    "exit_code": r.exit_code,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "execution_time_ms": r.execution_time_ms,
+                    "executed_on": r.executed_on.to_string(),
+                }))
+            }
+            None => Ok(serde_json::json!({ "status": "pending" })),
+        }
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+fn default_project_work_dir() -> String {
+    "/root/project".into()
+}
 
 fn json_rpc_error(code: i32, message: String) -> JsonRpcErrorPayload {
     JsonRpcErrorPayload { code, message }
@@ -277,7 +375,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = Arc::new(LocalObjectStore::new(dir.path().to_path_buf()).unwrap());
         let (tx, rx) = mpsc::channel(16);
-        let handler = JsonRpcHandler::new(tx, store);
+        let handler = JsonRpcHandler::new(tx, store, None);
         (handler, dir, rx)
     }
 

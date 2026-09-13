@@ -82,6 +82,11 @@ pub struct Capabilities {
     pub max_memory_mb: u64,
     /// Number of CPU cores available for execution.
     pub cpu_cores: u32,
+
+    /// Whether this node can run project sandboxes (Linux + KVM + qlean).
+    /// Master uses this to route ProjectTask to capable executors.
+    #[serde(default)]
+    pub project_sandbox: bool,
 }
 
 impl Default for Capabilities {
@@ -92,6 +97,7 @@ impl Default for Capabilities {
             runtimes: vec![RuntimeKind::Wasm],
             max_memory_mb: 1024,
             cpu_cores: 2,
+            project_sandbox: false,
         }
     }
 }

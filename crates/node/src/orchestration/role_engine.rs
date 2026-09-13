@@ -152,6 +152,7 @@ mod tests {
                 runtimes,
                 max_memory_mb: 1024,
                 cpu_cores: 2,
+                project_sandbox: false,
             },
             advertised_addresses: vec![],
             current_assigned_roles: roles,

@@ -9,6 +9,7 @@ mod cli;
 mod config;
 mod ipc;
 mod orchestration;
+mod project_client;
 mod project_executor;
 mod project_snapshot;
 mod raft;

@@ -74,6 +74,10 @@ pub struct CapabilitiesConfig {
 
     #[serde(default = "default_cpu_cores")]
     pub cpu_cores: u32,
+
+    /// Whether this node can run project sandboxes (Linux + KVM + qlean).
+    #[serde(default)]
+    pub project_sandbox: bool,
 }
 
 impl Default for CapabilitiesConfig {
@@ -84,6 +88,7 @@ impl Default for CapabilitiesConfig {
             runtimes: default_runtimes(),
             max_memory_mb: default_max_memory_mb(),
             cpu_cores: default_cpu_cores(),
+            project_sandbox: false,
         }
     }
 }
@@ -191,6 +196,7 @@ impl NodeConfig {
             runtimes,
             max_memory_mb: self.capabilities.max_memory_mb,
             cpu_cores: self.capabilities.cpu_cores,
+            project_sandbox: self.capabilities.project_sandbox,
         };
 
         NodeDescriptor {
