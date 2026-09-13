@@ -40,3 +40,10 @@ resolve_peer 对两种来源都支持：显式 target（按 node_id 匹配）或
 
 - 轻客户端不做 Raft，因此不参与共识、无 cluster 级任务队列视图（只做点对点 project 提交）；
 - 轻客户端依赖 descriptor 交换拿到执行节点；若节点能力变化，需要重新交换 descriptor。
+
+
+## 实测结果（同机 loopback）
+
+- 3 个执行节点 + 1 个轻客户端 master 同时运行；
+- 经轻客户端 IPC 提交项目，master 日志出现 project result 且 exit=0；
+- 说明轻客户端成功：拨 bootstrap -> 学 descriptor -> 解析执行节点 -> 发 ProjectTask -> 收结果。
