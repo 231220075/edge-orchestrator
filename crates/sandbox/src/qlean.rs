@@ -29,6 +29,8 @@ mod linux {
         }
     }
 
+    #[async_trait::async_trait]
+    #[async_trait::async_trait]
     impl ProjectSandbox for QleanSandbox {
         async fn run_project(&self, spec: ProjectSpec) -> Result<ExecutionResult> {
             let local_dir = spec.local_project_dir.clone();
@@ -102,6 +104,7 @@ mod linux {
 #[cfg(not(target_os = "linux"))]
 pub struct QleanSandbox;
 #[cfg(not(target_os = "linux"))]
+#[async_trait::async_trait]
 impl ProjectSandbox for QleanSandbox {
     async fn run_project(&self, _spec: ProjectSpec) -> Result<ExecutionResult> {
         Err(CoreError::UnsupportedPlatform(
