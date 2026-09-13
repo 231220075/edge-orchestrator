@@ -31,48 +31,46 @@ mod linux {
 
     impl ProjectSandbox for QleanSandbox {
         async fn run_project(&self, spec: ProjectSpec) -> Result<ExecutionResult> {
-            let start = Instant::now();
-            let mut out = ExecutionResult {
-                exit_code: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                execution_time_ms: 0,
-                peak_memory_bytes: 0,
-                result_hash: None,
-            };
-
             let local_dir = spec.local_project_dir.clone();
             let work_dir = spec.work_dir.clone();
             let build = spec.build_cmd.join(" ");
             let run = spec.run_cmd.join(" ");
             let timeout_ms = spec.timeout_ms;
 
-            let res = qlean::with_machine(&self.image, &self.config, |vm| {
+            let result = qlean::with_machine(&self.image, &self.config, |vm| {
                 Box::pin(async move {
+                    let start = Instant::now();
+                    let mut out = ExecutionResult {
+                        exit_code: 0,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        execution_time_ms: 0,
+                        peak_memory_bytes: 0,
+                        result_hash: None,
+                    };
+
                     if let Some(dir) = &local_dir {
                         if Path::new(dir).is_dir() {
+                            // qlean upload mirrors a directory into
+                            // remote_path/basename; upload into the parent of
+                            // work_dir to land exactly at work_dir.
                             let parent = Path::new(&work_dir)
                                 .parent()
                                 .map(|p| p.to_path_buf())
                                 .unwrap_or_else(|| Path::new("/root").to_path_buf());
-                            vm.upload(dir, parent)
-                                .await
-                                .map_err(|e| CoreError::SandboxExecution(format!("upload: {e}")))?;
+                            vm.upload(dir, parent).await?;
                         }
                     }
 
                     if !build.is_empty() {
                         let cmd = format!("cd {} && {}", work_dir, build);
-                        let b = vm
-                            .exec(&cmd)
-                            .await
-                            .map_err(|e| CoreError::SandboxExecution(format!("build: {e}")))?;
-                        out.exit_code = b.status.code().unwrap_or(1);
-                        out.stderr.extend_from_slice(&b.stderr);
+                        let b = vm.exec(&cmd).await?;
                         out.stdout.extend_from_slice(&b.stdout);
+                        out.stderr.extend_from_slice(&b.stderr);
                         if !b.status.success() {
+                            out.exit_code = b.status.code().unwrap_or(1);
                             out.execution_time_ms = start.elapsed().as_millis() as u64;
-                            return Ok(());
+                            return Ok(out);
                         }
                     }
 
@@ -81,25 +79,22 @@ mod linux {
                         out.stderr
                             .extend_from_slice(b"timeout: project execution exceeded budget");
                         out.execution_time_ms = start.elapsed().as_millis() as u64;
-                        return Ok(());
+                        return Ok(out);
                     }
 
                     let run_cmd = format!("cd {} && {}", work_dir, run);
-                    let r = vm
-                        .exec(&run_cmd)
-                        .await
-                        .map_err(|e| CoreError::SandboxExecution(format!("run: {e}")))?;
+                    let r = vm.exec(&run_cmd).await?;
                     out.exit_code = r.status.code().unwrap_or(0);
                     out.stdout.extend_from_slice(&r.stdout);
                     out.stderr.extend_from_slice(&r.stderr);
                     out.execution_time_ms = start.elapsed().as_millis() as u64;
-                    Ok(())
+                    Ok(out)
                 })
             })
-            .await;
+            .await
+            .map_err(|e| CoreError::SandboxExecution(format!("qlean run: {e}")))?;
 
-            res.map(|_| out)
-                .map_err(|e| CoreError::SandboxExecution(format!("qlean run: {e}")))
+            Ok(result)
         }
     }
 }
