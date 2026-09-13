@@ -112,6 +112,7 @@ impl Node {
             swarm_config,
             descriptor.clone(),
             Some(blob_provider),
+            None, // Phase 2 executor wiring lands in the next commit
         )
         .context("Failed to start P2P swarm")?;
         info!("P2P swarm started successfully");

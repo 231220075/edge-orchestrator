@@ -31,3 +31,13 @@ pub use swarm::{new_swarm, EdgeOrchSwarm, SwarmCommand, SwarmConfig, SwarmHandle
 pub trait BlobProvider: Send + Sync {
     fn get_blob(&self, hash: &str) -> Option<Vec<u8>>;
 }
+
+/// Executes a project task and returns its result. Implemented by execution
+/// nodes (Linux + KVM, wrapping QleanSandbox). Mirror of BlobProvider pattern.
+#[async_trait::async_trait]
+pub trait ProjectExecutor: Send + Sync {
+    async fn run(
+        &self,
+        task: eo_core::types::ProjectTask,
+    ) -> anyhow::Result<eo_core::types::ProjectResult>;
+}

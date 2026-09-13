@@ -15,7 +15,7 @@ use crate::behaviour::{EdgeOrchBehaviour, EdgeOrchBehaviourEvent};
 use crate::discovery::Event;
 use crate::protocol::{BlobRequest, BlobResponse, DescriptorRequest, DescriptorResponse};
 use crate::protocol::{RaftMessageRequest, RaftMessageResponse};
-use crate::BlobProvider;
+use crate::{BlobProvider, ProjectExecutor};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -73,6 +73,7 @@ pub fn new_swarm(
     config: SwarmConfig,
     self_descriptor: NodeDescriptor,
     blob_provider: Option<std::sync::Arc<dyn BlobProvider>>,
+    project_executor: Option<std::sync::Arc<dyn ProjectExecutor>>,
 ) -> Result<SwarmHandle> {
     let local_peer_id = keypair.public().to_peer_id();
     let local_public_key = keypair.public();
@@ -114,6 +115,7 @@ pub fn new_swarm(
             self_descriptor,
             bootstrap_peers,
             blob_provider,
+            project_executor,
         )
         .await;
     });
@@ -136,6 +138,7 @@ async fn run_event_loop(
     self_descriptor: NodeDescriptor,
     bootstrap_peers: Vec<Multiaddr>,
     blob_provider: Option<std::sync::Arc<dyn BlobProvider>>,
+    project_executor: Option<std::sync::Arc<dyn ProjectExecutor>>,
 ) {
     // Dial every explicitly-configured bootstrap peer once at startup. This
     // guarantees a full mesh even when mDNS races or a LAN is flaky.
@@ -163,7 +166,7 @@ async fn run_event_loop(
                         vec![Event::PeerConnected { peer_id }]
                     }
                     Some(SwarmEvent::Behaviour(event)) => {
-                        handle_behaviour_event(event, self_peer_id, &self_descriptor, &mut swarm, blob_provider.as_deref())
+                        handle_behaviour_event(event, self_peer_id, &self_descriptor, &mut swarm, blob_provider.as_deref(), project_executor.as_deref()).await
                     }
                     Some(_) => Vec::new(),
                     None => break,
@@ -219,12 +222,13 @@ async fn run_event_loop(
 // Behaviour event handlers
 // ---------------------------------------------------------------------------
 
-fn handle_behaviour_event(
+async fn handle_behaviour_event(
     event: EdgeOrchBehaviourEvent,
     self_peer_id: PeerId,
     self_descriptor: &NodeDescriptor,
     swarm: &mut EdgeOrchSwarm,
     blob_provider: Option<&dyn BlobProvider>,
+    project_executor: Option<&dyn ProjectExecutor>,
 ) -> Vec<Event> {
     match event {
         EdgeOrchBehaviourEvent::Mdns(mdns_event) => match mdns_event {
@@ -282,24 +286,58 @@ fn handle_behaviour_event(
                 .into_iter()
                 .collect::<Vec<Event>>()
         }
-        EdgeOrchBehaviourEvent::ProjectExchange(pe) => handle_project_exchange(pe)
-            .into_iter()
-            .collect::<Vec<Event>>()
-            .into_iter()
-            .collect(),
+        EdgeOrchBehaviourEvent::ProjectExchange(pe) => {
+            handle_project_exchange(pe, swarm, project_executor)
+                .await
+                .into_iter()
+                .collect::<Vec<Event>>()
+        }
+        .into_iter()
+        .collect(),
     }
 }
 
-fn handle_project_exchange(
+async fn handle_project_exchange(
     event: libp2p::request_response::Event<ProjectTask, ProjectResult>,
+    swarm: &mut EdgeOrchSwarm,
+    project_executor: Option<&dyn ProjectExecutor>,
 ) -> Option<Event> {
     use libp2p::request_response::{Event as RREvent, Message};
     match event {
         RREvent::Message { peer, message } => match message {
-            Message::Request { request, .. } => Some(Event::ProjectTaskReceived {
-                peer_id: peer,
-                task: request,
-            }),
+            Message::Request {
+                request, channel, ..
+            } => {
+                if let Some(executor) = project_executor {
+                    let result = executor.run(request.clone()).await;
+                    match result {
+                        Ok(res) => {
+                            let _ = swarm
+                                .behaviour_mut()
+                                .project_exchange
+                                .send_response(channel, res);
+                        }
+                        Err(e) => {
+                            let res = ProjectResult {
+                                task_id: request.task_id,
+                                exit_code: 1,
+                                stdout: Vec::new(),
+                                stderr: format!("{e:#}").into_bytes(),
+                                execution_time_ms: 0,
+                                executed_on: uuid::Uuid::nil(),
+                            };
+                            let _ = swarm
+                                .behaviour_mut()
+                                .project_exchange
+                                .send_response(channel, res);
+                        }
+                    }
+                }
+                Some(Event::ProjectTaskReceived {
+                    peer_id: peer,
+                    task: request,
+                })
+            }
             Message::Response { response, .. } => Some(Event::ProjectResultReceived {
                 peer_id: peer,
                 result: response,
