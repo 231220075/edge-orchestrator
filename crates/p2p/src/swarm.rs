@@ -130,6 +130,9 @@ pub fn new_swarm(
 // Event loop
 // ---------------------------------------------------------------------------
 
+// TODO(Phase 2 cleanup): fold providers/executor into a RuntimeHandles struct
+// to reduce argument count instead of this lint allowance.
+#[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
     mut swarm: EdgeOrchSwarm,
     event_tx: mpsc::Sender<Event>,

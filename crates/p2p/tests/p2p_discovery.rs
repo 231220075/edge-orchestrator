@@ -34,7 +34,7 @@ async fn single_swarm_starts_listening() {
     };
     let descriptor = make_test_descriptor();
 
-    let handle = new_swarm(keypair, config, descriptor, None).unwrap();
+    let handle = new_swarm(keypair, config, descriptor, None, None).unwrap();
 
     // Wait for the NewListenAddr event
     let result = timeout(TEST_TIMEOUT, async {
@@ -73,8 +73,8 @@ async fn two_nodes_discover_each_other() {
         bootstrap_peers: vec![],
     };
 
-    let handle1 = new_swarm(keypair1, config1, make_test_descriptor(), None).unwrap();
-    let handle2 = new_swarm(keypair2, config2, make_test_descriptor(), None).unwrap();
+    let handle1 = new_swarm(keypair1, config1, make_test_descriptor(), None, None).unwrap();
+    let handle2 = new_swarm(keypair2, config2, make_test_descriptor(), None, None).unwrap();
 
     let events1 = handle1.events;
     let events2 = handle2.events;
@@ -147,8 +147,8 @@ async fn descriptor_exchange_completes() {
         bootstrap_peers: vec![],
     };
 
-    let handle1 = new_swarm(keypair1, config1, make_test_descriptor(), None).unwrap();
-    let handle2 = new_swarm(keypair2, config2, make_test_descriptor(), None).unwrap();
+    let handle1 = new_swarm(keypair1, config1, make_test_descriptor(), None, None).unwrap();
+    let handle2 = new_swarm(keypair2, config2, make_test_descriptor(), None, None).unwrap();
 
     let events1 = handle1.events;
     let events2 = handle2.events;
@@ -216,7 +216,7 @@ async fn peer_expires_on_timeout() {
         bootstrap_peers: vec![],
     };
     let descriptor = make_test_descriptor();
-    let mut handle = new_swarm(keypair, config, descriptor, None).unwrap();
+    let mut handle = new_swarm(keypair, config, descriptor, None, None).unwrap();
 
     // Verify the swarm starts and produces a NewListenAddr event
     let got_listen = timeout(Duration::from_secs(5), async {
@@ -257,6 +257,7 @@ async fn blob_is_served_between_two_swarms() {
         },
         make_test_descriptor(),
         Some(std::sync::Arc::new(MemBlob(blob))),
+        None,
     )
     .unwrap();
     let mut ev1 = h1.events;
@@ -274,6 +275,7 @@ async fn blob_is_served_between_two_swarms() {
             bootstrap_peers: vec![addr1],
         },
         make_test_descriptor(),
+        None,
         None,
     )
     .unwrap();
