@@ -307,3 +307,100 @@ async fn blob_is_served_between_two_swarms() {
     };
     assert_eq!(got, b"hello-blob");
 }
+
+struct MockExecutor {
+    node_id: uuid::Uuid,
+}
+#[async_trait::async_trait]
+impl p2p::ProjectExecutor for MockExecutor {
+    async fn run(
+        &self,
+        task: eo_core::types::ProjectTask,
+    ) -> anyhow::Result<eo_core::types::ProjectResult> {
+        Ok(eo_core::types::ProjectResult {
+            task_id: task.task_id,
+            exit_code: 0,
+            stdout: b"mock-done".to_vec(),
+            stderr: Vec::new(),
+            execution_time_ms: 1,
+            executed_on: self.node_id,
+        })
+    }
+}
+
+#[tokio::test]
+async fn project_task_roundtrip_via_request_response() {
+    use std::time::Duration;
+    let keypair1 = identity::Keypair::generate_ed25519();
+    let keypair2 = identity::Keypair::generate_ed25519();
+    let peer2 = keypair2.public().to_peer_id();
+    let h2 = new_swarm(
+        keypair2,
+        SwarmConfig {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            bootstrap_peers: Vec::new(),
+        },
+        make_test_descriptor(),
+        None,
+        Some(std::sync::Arc::new(MockExecutor {
+            node_id: uuid::Uuid::new_v4(),
+        })),
+    )
+    .unwrap();
+    let mut ev2 = h2.events;
+    let addr2 = loop {
+        match tokio::time::timeout(Duration::from_secs(5), ev2.recv()).await {
+            Ok(Some(Event::NewListenAddr { address })) => break address,
+            Ok(Some(_)) => continue,
+            _ => panic!("no listen"),
+        }
+    };
+    let h1 = new_swarm(
+        keypair1,
+        SwarmConfig {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            bootstrap_peers: vec![addr2],
+        },
+        make_test_descriptor(),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut ev1 = h1.events;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), ev1.recv()).await {
+            Ok(Some(Event::PeerConnected { peer_id })) if peer_id == peer2 => break,
+            Ok(Some(_)) => continue,
+            _ => panic!("no connect"),
+        }
+    }
+    let task = eo_core::types::ProjectTask {
+        task_id: uuid::Uuid::new_v4(),
+        snapshot: eo_core::types::ProjectSnapshot {
+            hash: "tarhash".into(),
+            tar_bytes: b"tar".to_vec(),
+        },
+        work_dir: "/root/proj".into(),
+        build_cmd: vec!["make".into()],
+        run_cmd: vec!["./app".into()],
+        timeout_ms: 5000,
+        resource_limits: eo_core::types::ResourceLimits::default(),
+        pinned_node: None,
+    };
+    h1.commands
+        .send(p2p::SwarmCommand::SendProjectTask {
+            peer_id: peer2,
+            task,
+        })
+        .await
+        .unwrap();
+    let result = loop {
+        match tokio::time::timeout(Duration::from_secs(10), ev1.recv()).await {
+            Ok(Some(Event::ProjectResultReceived { result, .. })) => break result,
+            Ok(Some(_)) => continue,
+            _ => panic!("no result"),
+        }
+    };
+    assert_eq!(result.stdout, b"mock-done");
+    assert_eq!(result.exit_code, 0);
+}
