@@ -23,7 +23,7 @@ sleep 12
 
 echo "[3/4] submit project (first run installs gcc in the guest; may take minutes)"
 PROJ=scripts/qlean-project-demo/testproj
-./target/debug/examples/submit_project /tmp/eo-proj/n1.sock "$PROJ" "apt-get update -qq && apt-get install -y -qq gcc && gcc main.c -o app" "./app"
+./target/debug/examples/submit_project /tmp/eo-proj/n1.sock "$PROJ" "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc && gcc main.c -o app" "./app"
 
 echo "[4/4] evidence"
 grep -h "project result" /tmp/eo-proj/n1.log /tmp/eo-proj/n2.log /tmp/eo-proj/n3.log | tail -3 || true
