@@ -6,6 +6,7 @@ use libp2p::mdns;
 use libp2p::ping;
 use libp2p::request_response;
 use libp2p::swarm::NetworkBehaviour;
+use std::time::Duration;
 
 use crate::protocol::{BlobCodec, DescriptorCodec, ProjectCodec, RaftMessageCodec};
 
@@ -53,12 +54,14 @@ impl EdgeOrchBehaviour {
             request_response::Config::default(),
         );
 
+        // Project execution can take minutes (VM boot + build), far beyond the
+        // 10s default request timeout, so allow a long window.
         let project_exchange = request_response::Behaviour::new(
             std::iter::once((
                 ProjectCodec::protocol(),
                 request_response::ProtocolSupport::Full,
             )),
-            request_response::Config::default(),
+            request_response::Config::default().with_request_timeout(Duration::from_secs(1800)),
         );
 
         Self {

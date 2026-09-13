@@ -57,8 +57,8 @@ async fn main() {
         std::process::exit(1);
     }
 
-    for _ in 0..60 {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    for i in 0..600 {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         let r = call(
             &sock,
             "fetch_project_result",
@@ -68,6 +68,9 @@ async fn main() {
         if r["result"]["status"] == "completed" {
             println!("result -> {}", r);
             return;
+        }
+        if i % 10 == 0 {
+            eprintln!("... still pending ({}s)", (i + 1) * 3);
         }
     }
     eprintln!("timeout waiting for project result");

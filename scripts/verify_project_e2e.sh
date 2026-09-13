@@ -2,6 +2,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+cleanup() { pkill -f "cluster-node-" 2>/dev/null || true; }
+trap cleanup EXIT
+
+echo "[0/4] cleanup old nodes"
+cleanup
+sleep 1
+
 echo "[1/4] build"
 cargo build -p node --quiet
 cargo build -p node --example submit_project --quiet
@@ -20,4 +27,3 @@ PROJ=scripts/qlean-project-demo/testproj
 
 echo "[4/4] evidence"
 grep -h "project result" /tmp/eo-proj/n1.log /tmp/eo-proj/n2.log /tmp/eo-proj/n3.log | tail -3 || true
-pkill -f "cluster-node-" || true
