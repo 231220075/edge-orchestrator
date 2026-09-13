@@ -29,7 +29,13 @@ mod imp {
     impl p2p::ProjectExecutor for QleanProjectExecutor {
         async fn run(&self, task: ProjectTask) -> anyhow::Result<ProjectResult> {
             let tmp = tempfile::tempdir()?;
-            let project_dir = tmp.path().join("project");
+            // Name the unpacked dir after work_dir's basename so that qlean's
+            // upload-mirror semantics land it exactly at work_dir.
+            let base = std::path::Path::new(&task.work_dir)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "project".to_string());
+            let project_dir = tmp.path().join(base);
             extract_snapshot(&task.snapshot, &project_dir)
                 .map_err(|e| anyhow::anyhow!("extract snapshot: {e}"))?;
 

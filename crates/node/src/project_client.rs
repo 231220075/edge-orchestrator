@@ -18,6 +18,7 @@ pub struct ProjectClient {
     registry: RaftIdRegistry,
     state: Arc<Mutex<ClusterState>>,
     results: Arc<Mutex<HashMap<TaskId, ProjectResult>>>,
+    self_node_id: NodeId,
 }
 
 impl ProjectClient {
@@ -26,12 +27,14 @@ impl ProjectClient {
         registry: RaftIdRegistry,
         state: Arc<Mutex<ClusterState>>,
         results: Arc<Mutex<HashMap<TaskId, ProjectResult>>>,
+        self_node_id: NodeId,
     ) -> Self {
         Self {
             swarm_commands,
             registry,
             state,
             results,
+            self_node_id,
         }
     }
 
@@ -43,13 +46,18 @@ impl ProjectClient {
                     .nodes
                     .get(&id)
                     .ok_or_else(|| CoreError::InvalidState(format!("unknown target node {id}")))?,
-                None => state
-                    .nodes
-                    .values()
-                    .find(|d| d.capabilities.project_sandbox)
-                    .ok_or_else(|| {
-                        CoreError::InvalidState("no node with project_sandbox capability".into())
-                    })?,
+                None => {
+                    let self_id = self.self_node_id;
+                    state
+                        .nodes
+                        .values()
+                        .find(|d| d.capabilities.project_sandbox && d.node_id != self_id)
+                        .ok_or_else(|| {
+                            CoreError::InvalidState(
+                                "no remote node with project_sandbox capability".into(),
+                            )
+                        })?
+                }
             };
             let rid = node
                 .raft_id
@@ -139,13 +147,14 @@ mod tests {
             .to_peer_id()
     }
 
-    fn client(state: ClusterState, registry: RaftIdRegistry) -> ProjectClient {
+    fn client(state: ClusterState, registry: RaftIdRegistry, self_id: NodeId) -> ProjectClient {
         let (tx, _rx) = mpsc::channel(4);
         ProjectClient::new(
             tx,
             registry,
             Arc::new(Mutex::new(state)),
             Arc::new(Mutex::new(HashMap::new())),
+            self_id,
         )
     }
 
@@ -157,7 +166,7 @@ mod tests {
         let registry = RaftIdRegistry::new();
         let pid = peer();
         registry.insert(1, pid);
-        let c = client(state, registry);
+        let c = client(state, registry, uuid::Uuid::new_v4());
         assert_eq!(c.resolve_peer(None).unwrap(), pid);
     }
 
@@ -166,7 +175,7 @@ mod tests {
         let node_id = uuid::Uuid::new_v4();
         let mut state = ClusterState::default();
         state.nodes.insert(node_id, make_node(node_id, 1, false));
-        let c = client(state, RaftIdRegistry::new());
+        let c = client(state, RaftIdRegistry::new(), uuid::Uuid::new_v4());
         assert!(c.resolve_peer(None).is_err());
     }
 
@@ -186,6 +195,7 @@ mod tests {
             registry,
             Arc::new(Mutex::new(state)),
             Arc::new(Mutex::new(HashMap::new())),
+            uuid::Uuid::new_v4(),
         );
         let task_id = c
             .submit_local_project(

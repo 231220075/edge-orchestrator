@@ -226,6 +226,7 @@ impl Node {
                 raft_registry.clone(),
                 st,
                 Arc::clone(&project_results),
+                descriptor.node_id,
             ))
         });
 
