@@ -19,11 +19,23 @@ const MAX_DEPTH: usize = 3;
     name = "eo-agent",
     about = "Plan, submit and analyze a project on the cluster"
 )]
-struct Args {
-    /// Workspace directory to build and run.
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Commands {
+    /// Scan a workspace, plan build/run, submit to the cluster and analyze.
+    Run(RunArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct RunArgs {
+    /// Workspace directory to build and run (resolved on the node host).
     #[arg(long)]
     workspace: PathBuf,
-    /// Node IPC Unix socket path.
+    /// Node IPC Unix socket path (must be a node on this same host).
     #[arg(long, default_value = "~/.edge-orchestrator/ipc.sock")]
     socket: String,
     /// Natural-language goal (optional).
@@ -226,7 +238,7 @@ async fn rpc(socket: &str, method: &str, params: Value) -> Result<Value> {
     Ok(v.get("result").cloned().unwrap_or(Value::Null))
 }
 
-async fn submit_and_wait(args: &Args, info: &WorkspaceInfo, plan: &Plan) -> Result<Value> {
+async fn submit_and_wait(args: &RunArgs, info: &WorkspaceInfo, plan: &Plan) -> Result<Value> {
     let params = jmacro!({
         "project_dir": info.root.to_string_lossy(),
         "work_dir": plan.work_dir.clone(),
@@ -360,8 +372,21 @@ fn llm_analysis(result: &Value) -> Result<String> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
-    let info = scan_workspace(&args.workspace)?;
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Run(args) => run(args).await,
+    }
+}
+
+async fn run(args: RunArgs) -> Result<()> {
+    // Resolve the workspace absolutely so the node resolves the same directory
+    // (agent and node share a host in this design).
+    let workspace = std::fs::canonicalize(&args.workspace)
+        .with_context(|| format!("workspace not found: {}", args.workspace.display()))?;
+    if !workspace.is_dir() {
+        anyhow::bail!("workspace is not a directory: {}", workspace.display());
+    }
+    let info = scan_workspace(&workspace)?;
 
     let mut plan = if llm_enabled() {
         match llm_plan(&info, args.goal.as_deref()) {
@@ -458,5 +483,81 @@ mod tests {
     fn heuristic_makefile() {
         let p = heuristic_plan(&info(&["Makefile", "a.c", "b.c"]));
         assert!(p.build_cmd[0].contains("make"));
+    }
+    #[tokio::test]
+    async fn submit_and_wait_roundtrip_against_mock_node() {
+        use tokio::net::UnixListener;
+        let short = uuid::Uuid::new_v4().simple().to_string();
+        let dir = PathBuf::from(format!("/tmp/eo-it-{}", &short[..8]));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("ipc.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = tokio::spawn(async move {
+            let mut polls = 0u32;
+            while let Ok((stream, _)) = listener.accept().await {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    continue;
+                }
+                let req: Value = serde_json::from_str(line.trim()).unwrap();
+                let method = req["method"].as_str().unwrap_or("").to_string();
+                let id = req["id"].clone();
+                let result = match method.as_str() {
+                    "submit_project" => {
+                        jmacro!({ "task_id": "11111111-1111-1111-1111-111111111111" })
+                    }
+                    "fetch_project_result" => {
+                        polls += 1;
+                        if polls < 2 {
+                            jmacro!({ "status": "pending" })
+                        } else {
+                            use base64::Engine;
+                            let out =
+                                base64::engine::general_purpose::STANDARD.encode("project-hello\n");
+                            jmacro!({
+                                "status": "completed",
+                                "exit_code": 0,
+                                "stdout": out,
+                                "stderr": "",
+                                "execution_time_ms": 1,
+                                "executed_on": "22222222-2222-2222-2222-222222222222"
+                            })
+                        }
+                    }
+                    _ => Value::Null,
+                };
+                let resp = jmacro!({ "jsonrpc": "2.0", "result": result, "id": id });
+                let mut payload = resp.to_string();
+                payload.push(char::from(10));
+                let mut w = reader.into_inner();
+                w.write_all(payload.as_bytes()).await.unwrap();
+                w.flush().await.unwrap();
+            }
+        });
+
+        let args = RunArgs {
+            workspace: PathBuf::from("."),
+            socket: sock.to_string_lossy().to_string(),
+            goal: None,
+            target_node: None,
+            max_attempts: 1,
+            json: true,
+        };
+        let info = WorkspaceInfo {
+            root: PathBuf::from("."),
+            files: Vec::new(),
+        };
+        let plan = Plan {
+            build_cmd: Vec::new(),
+            run_cmd: vec!["true".to_string()],
+            work_dir: "/root/project".to_string(),
+        };
+        let res = submit_and_wait(&args, &info, &plan).await.unwrap();
+        assert_eq!(res["status"].as_str(), Some("completed"));
+        assert_eq!(decode(res["stdout"].as_str().unwrap()), "project-hello\n");
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

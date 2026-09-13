@@ -47,3 +47,15 @@
 - LLM 路径未在本环境实测（无 API key），仅代码就绪；
 - 重试策略简单（最多 N 次，仅 LLM 模式会修订命令）；
 - agent 只读工作区，不回写；不做多智能体编排（遵循 AGENT_PLAN.md 的结论）。
+
+
+## 复核与修复（第二次检查）
+
+对 agent 做了全面复核，发现并修复：
+
+1. CLI 形状与调用不一致：脚本用 eo-agent run --workspace，但原 CLI 是扁平参数。已改为标准子命令（Cli + Commands::Run(RunArgs)），并提供 --help；
+2. 工作区路径未规范化：agent 直接把相对路径发给节点，节点按自己的 CWD 解析 -> 已改为 canonicalize 成绝对路径，并在不存在/非目录时提前报错；
+3. 缺少真实 IPC 交互测试：新增 mock UDS 节点测试，覆盖 submit_project + 两次 fetch（pending -> completed）+ base64 解码断言；
+4. 长 socket 测试路径在 macOS 超过 SUN_LEN -> 测试改用 /tmp 短路径。
+
+说明：本项目设计下，agent 的 --socket 必须指向“与 agent 同主机”的节点（同机直连或 Mac 上的轻客户端节点），因为项目目录由该节点打包。
