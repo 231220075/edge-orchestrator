@@ -43,10 +43,10 @@ mod imp {
                 resource_limits: task.resource_limits.clone(),
             };
 
-            let er = self
-                .sandbox
-                .run_project(spec)
+            let sandbox = std::sync::Arc::clone(&self.sandbox);
+            let er = tokio::task::spawn_blocking(move || sandbox.run_project(spec))
                 .await
+                .map_err(|e| anyhow::anyhow!("join: {e}"))?
                 .map_err(|e| anyhow::anyhow!("qlean run_project: {e:#}"))?;
 
             Ok(ProjectResult {

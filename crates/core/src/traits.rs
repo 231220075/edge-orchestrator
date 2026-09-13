@@ -129,9 +129,8 @@ pub trait Runtime: Send + Sync {
 /// A project-level sandbox: takes a working tree + build/run commands and
 /// returns a captured execution result. Used by the Linux+KVM (qlean) backend
 /// as opposed to the bytecode-oriented Sandbox trait (Wasmtime).
-#[async_trait::async_trait]
 pub trait ProjectSandbox: Send + Sync {
-    async fn run_project(
+    fn run_project(
         &self,
         spec: crate::types::ProjectSpec,
     ) -> crate::error::Result<crate::types::ExecutionResult>;
