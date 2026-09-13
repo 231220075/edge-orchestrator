@@ -116,7 +116,7 @@ impl WasmtimeSandbox {
 
         match call_result {
             Ok(()) => Epilog::Ok,
-            Err(e) if was_timeout => Epilog::Timeout,
+            Err(_e) if was_timeout => Epilog::Timeout,
             Err(e) => Epilog::Trap(format!("{e:?}")),
         }
     }

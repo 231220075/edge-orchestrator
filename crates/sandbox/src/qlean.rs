@@ -93,7 +93,8 @@ mod linux {
                     out.execution_time_ms = start.elapsed().as_millis() as u64;
                     Ok(())
                 })
-            });
+            })
+            .await;
 
             res.map(|_| out)
                 .map_err(|e| CoreError::SandboxExecution(format!("qlean run: {e}")))
