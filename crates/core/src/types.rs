@@ -208,8 +208,14 @@ impl Default for ResourceLimits {
 /// bytecode-oriented  used by the Wasm sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectSpec {
-    /// Content hash of the project snapshot (a tar blob in CAS).
+    /// Content hash of the project snapshot (a tar blob in CAS). Used in the
+    /// cross-node path (Phase 2); for Phase 1 local execution this may be empty
+    /// and local_project_dir is used instead.
     pub snapshot_hash: Hash,
+    /// Local project directory on the master filesystem, to be uploaded into
+    /// the VM. Phase 1 path; Phase 2 replaces it with the hash above.
+    #[serde(default)]
+    pub local_project_dir: Option<String>,
     /// Working directory inside the sandbox where the project is unpacked.
     pub work_dir: String,
     /// Build command with args, e.g. ["cargo", "build", "--release"].

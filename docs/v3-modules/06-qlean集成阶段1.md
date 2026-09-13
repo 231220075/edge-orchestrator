@@ -27,3 +27,11 @@
 - 补 upload 项目目录（tar）进 VM + 从 CAS 读 snapshot；
 - 加 build/run 超时看门狗（qlean exec 无命令级超时）；
 - 预装工具链镜像或 first-boot apt 方案。
+
+## 阶段 1 收尾（真实 Linux 验证后补充）
+
+- ProjectSpec 新增 local_project_dir（Phase 1 本地目录路径，snapshot_hash 留 Phase 2 跨节点）；
+- QleanSandbox.run_project 增加：目录 upload 到 work_dir（按 qlean upload 的 mirror 语义上传到 parent）、build/run 用 cd work_dir 进入、手动超时判断（qlean exec 无超时）；
+- 独立 demo scripts/qlean-upload-demo 验证 upload 目录语义；
+- Linux 验证清单见 08-Phase1-Linux验证清单.md。
+
