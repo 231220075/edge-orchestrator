@@ -108,16 +108,22 @@ fn heuristic_plan(info: &WorkspaceInfo) -> Plan {
             work_dir: work,
         };
     }
-    if has(info, "Makefile") {
+    let top_cs: Vec<&String> = info
+        .files
+        .iter()
+        .filter(|f| !f.contains('/') && f.ends_with(".c"))
+        .collect();
+    if top_cs.len() == 1 {
+        let cfile = top_cs[0];
         return Plan {
-            build_cmd: vec![format!("{} && make", ensure_tool("make"))],
-            run_cmd: vec!["make run".into()],
+            build_cmd: vec![format!("{} && gcc {} -o app", ensure_tool("gcc"), cfile)],
+            run_cmd: vec!["./app".into()],
             work_dir: work,
         };
     }
-    if let Some(cfile) = first_with_ext(info, ".c") {
+    if has(info, "Makefile") {
         return Plan {
-            build_cmd: vec![format!("{} && gcc {} -o app", ensure_tool("gcc"), cfile)],
+            build_cmd: vec![format!("{} && make", ensure_tool("make"))],
             run_cmd: vec!["./app".into()],
             work_dir: work,
         };
@@ -450,7 +456,7 @@ mod tests {
 
     #[test]
     fn heuristic_makefile() {
-        let p = heuristic_plan(&info(&["Makefile", "a.c"]));
+        let p = heuristic_plan(&info(&["Makefile", "a.c", "b.c"]));
         assert!(p.build_cmd[0].contains("make"));
     }
 }
