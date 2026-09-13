@@ -22,15 +22,16 @@ async fn run() -> Result<()> {
     std::fs::create_dir_all(&unpacked)?;
     let mut archive = tar::Archive::new(tar_bytes.as_slice());
     archive.unpack(&unpacked)?;
+    let upload_src = unpacked.to_string_lossy().into_owned();
 
     // 3. run in qlean VM
     let image = Image::new(ImageConfig::default()).await?;
     let config = MachineConfig::default();
 
     with_machine(&image, &config, |vm| {
-        Box::pin(async {
+        Box::pin(async move {
             // qlean mirrors dir into remote_path/basename; upload to parent
-            vm.upload(unpacked.to_string_lossy().as_ref(), "/root").await?;
+            vm.upload(upload_src.as_str(), "/root").await?;
 
             let build = vm.exec("cd /root/testproj && make").await?;
             if !build.status.success() {
