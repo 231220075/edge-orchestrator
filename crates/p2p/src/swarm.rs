@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use eo_core::error::Result;
-use eo_core::types::NodeDescriptor;
+use eo_core::types::{NodeDescriptor, ProjectResult, ProjectTask};
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{identify, identity, Multiaddr, PeerId, SwarmBuilder};
@@ -46,6 +46,8 @@ pub enum SwarmCommand {
     },
     /// Ask a peer for a CAS blob by hash.
     RequestBlob { peer_id: PeerId, hash: String },
+    /// Send a project-task to a peer (master -> executor).
+    SendProjectTask { peer_id: PeerId, task: ProjectTask },
 }
 
 /// Handle for interacting with a running swarm.
@@ -199,6 +201,10 @@ async fn run_event_loop(
                         swarm.behaviour_mut().blob_exchange
                             .send_request(&peer_id, request);
                     }
+                    Some(SwarmCommand::SendProjectTask { peer_id, task }) => {
+                        swarm.behaviour_mut().project_exchange
+                            .send_request(&peer_id, task);
+                    }
                     None => {
                         debug!("Command sender dropped, shutting down swarm event loop");
                         break;
@@ -276,8 +282,38 @@ fn handle_behaviour_event(
                 .into_iter()
                 .collect::<Vec<Event>>()
         }
-        .into_iter()
-        .collect(),
+        EdgeOrchBehaviourEvent::ProjectExchange(pe) => handle_project_exchange(pe)
+            .into_iter()
+            .collect::<Vec<Event>>()
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn handle_project_exchange(
+    event: libp2p::request_response::Event<ProjectTask, ProjectResult>,
+) -> Option<Event> {
+    use libp2p::request_response::{Event as RREvent, Message};
+    match event {
+        RREvent::Message { peer, message } => match message {
+            Message::Request { request, .. } => Some(Event::ProjectTaskReceived {
+                peer_id: peer,
+                task: request,
+            }),
+            Message::Response { response, .. } => Some(Event::ProjectResultReceived {
+                peer_id: peer,
+                result: response,
+            }),
+        },
+        RREvent::OutboundFailure { peer, error, .. } => {
+            warn!("Outbound project request failed to {}: {}", peer, error);
+            None
+        }
+        RREvent::InboundFailure { peer, error, .. } => {
+            warn!("Inbound project request failed from {}: {}", peer, error);
+            None
+        }
+        RREvent::ResponseSent { .. } => None,
     }
 }
 

@@ -6,7 +6,7 @@
 //!
 //! Uses JSON with a 4-byte big-endian length prefix for framing.
 
-use eo_core::types::NodeDescriptor;
+use eo_core::types::{NodeDescriptor, ProjectResult, ProjectTask};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response;
 use libp2p::StreamProtocol;
@@ -320,6 +320,84 @@ impl request_response::Codec for BlobCodec {
     async fn write_response<T>(
         &mut self,
         _protocol: &Self::Protocol,
+        io: &mut T,
+        resp: Self::Response,
+    ) -> std::io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let data = serde_json::to_vec(&resp)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_length_prefixed(io, &data).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Project execution protocol (master -> Linux executor)
+// ---------------------------------------------------------------------------
+
+pub const PROJECT_PROTOCOL: &str = "/edge-orch/project/1.0.0";
+const PROJECT_REQUEST_MAX_SIZE: usize = 64 * 1024 * 1024;
+const PROJECT_RESPONSE_MAX_SIZE: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Default)]
+pub struct ProjectCodec;
+
+impl ProjectCodec {
+    pub fn protocol() -> StreamProtocol {
+        StreamProtocol::new(PROJECT_PROTOCOL)
+    }
+}
+
+#[async_trait::async_trait]
+impl request_response::Codec for ProjectCodec {
+    type Protocol = StreamProtocol;
+    type Request = ProjectTask;
+    type Response = ProjectResult;
+
+    async fn read_request<T>(
+        &mut self,
+        _p: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let data = read_length_prefixed(io, PROJECT_REQUEST_MAX_SIZE).await?;
+        serde_json::from_slice(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        _p: &Self::Protocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let data = read_length_prefixed(io, PROJECT_RESPONSE_MAX_SIZE).await?;
+        serde_json::from_slice(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _p: &Self::Protocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> std::io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let data = serde_json::to_vec(&req)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_length_prefixed(io, &data).await
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _p: &Self::Protocol,
         io: &mut T,
         resp: Self::Response,
     ) -> std::io::Result<()>

@@ -290,6 +290,12 @@ impl Node {
                         info!("Blob {} fetched from {} ({} bytes)", hash, peer_id, data.len());
                     }
                 }
+                Some(Event::ProjectTaskReceived { peer_id, task }) => {
+                    info!("project task {} received from {} (Phase 2: executor wiring pending)", task.task_id, peer_id);
+                }
+                Some(Event::ProjectResultReceived { peer_id, result }) => {
+                    info!("project result {} from {} exit={}", result.task_id, peer_id, result.exit_code);
+                }
                 Some(Event::RaftMessageReceived { peer_id, data }) => {
                     debug!("Got raft bytes from {}", peer_id);
                     if self

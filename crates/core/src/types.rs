@@ -228,6 +228,43 @@ pub struct ProjectSpec {
     pub resource_limits: ResourceLimits,
 }
 
+/// A packed project snapshot: the tar bytes plus their CAS hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectSnapshot {
+    /// CAS hash of the tar bytes.
+    pub hash: Hash,
+    /// The tar bytes themselves. Phase 2 minimum viable path carries them
+    /// inline; larger projects should push to CAS first and send only hash.
+    pub tar_bytes: Vec<u8>,
+}
+
+/// A cross-node project execution request sent from master to an execution
+/// node (Linux + KVM).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectTask {
+    pub task_id: TaskId,
+    pub snapshot: ProjectSnapshot,
+    /// Directory inside the sandbox where the snapshot is unpacked.
+    pub work_dir: String,
+    pub build_cmd: Vec<String>,
+    pub run_cmd: Vec<String>,
+    pub timeout_ms: u64,
+    pub resource_limits: ResourceLimits,
+    pub pinned_node: Option<NodeId>,
+}
+
+/// Result of a cross-node project execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectResult {
+    pub task_id: TaskId,
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub execution_time_ms: u64,
+    /// NodeId of the executor that ran the task.
+    pub executed_on: NodeId,
+}
+
 /// Result of executing code in a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionResult {
@@ -321,5 +358,25 @@ mod tests {
         let json = serde_json::to_string(&result).expect("serialize");
         let result2: ExecutionResult = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(result, result2);
+    }
+
+    #[test]
+    fn project_task_serde_roundtrip() {
+        let task = ProjectTask {
+            task_id: Uuid::new_v4(),
+            snapshot: ProjectSnapshot {
+                hash: "abc123".into(),
+                tar_bytes: b"tar".to_vec(),
+            },
+            work_dir: "/root/proj".into(),
+            build_cmd: vec!["cargo".into(), "build".into()],
+            run_cmd: vec!["./target/app".into()],
+            timeout_ms: 5000,
+            resource_limits: ResourceLimits::default(),
+            pinned_node: Some(Uuid::new_v4()),
+        };
+        let json = serde_json::to_string(&task).expect("serialize");
+        let task2: ProjectTask = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(task, task2);
     }
 }

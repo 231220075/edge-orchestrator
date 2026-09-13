@@ -3,7 +3,7 @@
 //! These events are produced by the swarm event loop and consumed
 //! by the node's bootstrap and orchestration layers.
 
-use eo_core::types::NodeDescriptor;
+use eo_core::types::{NodeDescriptor, ProjectResult, ProjectTask};
 use libp2p::PeerId;
 
 /// Application-level events emitted by the P2P swarm.
@@ -65,6 +65,15 @@ pub enum Event {
     PeerConnected {
         /// The peer.
         peer_id: PeerId,
+    },
+
+    /// An incoming project execution task from master.
+    ProjectTaskReceived { peer_id: PeerId, task: ProjectTask },
+
+    /// Result of a project execution returned from an executor.
+    ProjectResultReceived {
+        peer_id: PeerId,
+        result: ProjectResult,
     },
 
     /// A Raft protobuf message arrived over the network.
