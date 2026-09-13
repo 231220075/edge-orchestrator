@@ -8,6 +8,7 @@ use eo_core::types::{NodeId, ProjectResult, ProjectTask};
 mod imp {
     use super::*;
     use crate::project_snapshot::extract_snapshot;
+    use eo_core::traits::ProjectSandbox as _;
     use eo_core::types::ProjectSpec;
 
     pub struct QleanProjectExecutor {
