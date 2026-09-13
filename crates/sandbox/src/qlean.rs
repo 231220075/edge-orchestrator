@@ -104,7 +104,7 @@ mod linux {
 
             handle
                 .join()
-                .map_err(|_| CoreError::Internal("qlean thread panicked".into()))??
+                .map_err(|_| CoreError::Internal("qlean thread panicked".into()))?
         }
     }
 }
