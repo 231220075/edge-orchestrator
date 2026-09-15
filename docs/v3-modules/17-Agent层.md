@@ -63,13 +63,15 @@
 
 ## 第三轮修复：轮询无输出 + LLM 配置机制
 
-### “卡住”的真相
-未配置 LLM 时不会调用 LLM（走启发式），所以那不是 LLM 卡住。真正原因是 submit_and_wait 每 3s 轮询一次、期间不打印任何东西，而首次任务要冷启动 VM + 装 gcc（约 90s），看起来像卡死。
+### 「卡住」的初判（已被第四轮推翻）
+第三轮的判断是：未配置 LLM 时不会调用 LLM（走启发式），所以不是 LLM 卡住；真正原因是 submit_and_wait 每 3s 轮询一次、期间不打印任何东西，而首次任务要冷启动 VM + 装 gcc（约 90s），看起来像卡死。
 
-修复：
+修复（保留，日志仍然有用）：
 - 提交后打印 task_id 与说明；
 - 每 15s 打印一次 still running... Ns；
 - 30 分钟超时后给出明确错误。
+
+**但这条结论只对冷启动 90s 那一次成立。** 后续实测出现 540s+ 仍未完成、且 `verify_project_e2e.sh`（不经过 agent）同样卡在 pending，说明问题不在 agent，见 `20-项目执行卡死排查.md`。
 
 ### LLM API Key 配置机制
 - 优先级：环境变量 > 配置文件；
@@ -81,5 +83,20 @@
 - 本地无鉴权端点（如 Ollama）可留空 api_key。
 
 ### 新增 --dry-run
-只打印计划不提交，便于区分“计划问题”和“执行问题”（本地即可验证，无需集群）。
+只打印计划不提交，便于区分「计划问题」和「执行问题」（本地即可验证，无需集群）。
+
+## 第四轮修复：把「pending 到永远」变成可定位的失败
+
+背景：submit_project 返回 task_id 只代表「本地打包 + 寻址 + 入队」成功，不代表任务发出去了，更不代表有人在跑。链路上有 6 处静默失败路径，全部表现为一个 `pending`。详见 `20-项目执行卡死排查.md`。
+
+本轮改动：
+
+1. **agent 识别终态失败**：`fetch_project_result` 现在可能返回 `status=failed` + `error`，agent 立刻带原因退出，不再轮询到 30 分钟；轮询输出也带上 status；
+2. **执行器不再静默丢包**：`crates/p2p/src/swarm.rs` 中无 project executor 的节点会回 `exit_code=101` 的失败结果（原来直接 return，什么都不发），并打出 warn；
+3. **执行移出事件循环**：项目请求的 ResponseChannel 登记进 pending map，任务在 detached task 上跑完把结果回投事件循环，由事件循环调用 `send_response`。此前「spawn + 等 oneshot」仍会占住事件循环（ResponseChannel 只是投递给 request-response handler，必须再次 poll swarm 才会写出响应）；
+4. **全阶段 tracing**：swarm 侧记录 accepted/finished/输出尾部，sandbox 侧记录 image/boot/upload/build/run 每阶段开始结束与耗时；
+5. **执行层超时**：`crates/sandbox/src/qlean.rs` 的 image（300s）、boot（600s）、upload（300s）、build/run 都加了 `tokio::time::timeout`，超时明确报错并丢弃 VM，不再无限等待；
+6. **能力与真实执行能力一致**：节点拿不到可用沙箱时，注册前把 `project_sandbox` 降级为 false，避免 master 永远路由到一个跑不了的节点；
+7. **master 侧兜底**：`ProjectClient` 记录任务状态（dispatched/failed/done），超过协议窗口（1920s）仍无结果则报 failed，不留永久 pending。
+
 

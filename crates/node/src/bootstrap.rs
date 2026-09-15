@@ -97,7 +97,20 @@ impl Node {
         info!("Identity ready: peer_id={}", peer_id);
 
         // 3. Build descriptor (raft_id comes from config)
-        let descriptor = config.to_descriptor();
+        let mut descriptor = config.to_descriptor();
+
+        // 3a. Resolve the project executor BEFORE advertising the capability:
+        // a node that cannot actually execute projects must not claim it, or the
+        // master will route every task to it and wait forever.
+        let project_executor = make_project_executor(descriptor.node_id);
+        if project_executor.is_none() && descriptor.capabilities.project_sandbox {
+            warn!(
+                "no usable project sandbox on this node (Linux + KVM + qlean required); \
+                 downgrading advertised project_sandbox=false so the master does not route \
+                 project tasks here"
+            );
+            descriptor.capabilities.project_sandbox = false;
+        }
         info!(
             "Node descriptor: node_id={}, raft_id={:?}, capabilities={:?}",
             descriptor.node_id, descriptor.raft_id, descriptor.capabilities
@@ -137,7 +150,7 @@ impl Node {
             swarm_config,
             descriptor.clone(),
             Some(blob_provider),
-            make_project_executor(descriptor.node_id),
+            project_executor,
         )
         .context("Failed to start P2P swarm")?;
         info!("P2P swarm started successfully");
@@ -347,18 +360,10 @@ impl Node {
                         info!("Blob {} fetched from {} ({} bytes)", hash, peer_id, data.len());
                     }
                 }
-                Some(Event::ProjectTaskReceived { peer_id, task }) => {
-                    // Swarm already ran the executor and replied; this is
-                    // observability on the serving node.
-                    info!(
-                        "project task {} received from {}",
-                        task.task_id, peer_id
-                    );
-                }
                 Some(Event::ProjectResultReceived { peer_id, result }) => {
                     info!(
-                        "project result {} from {} exit={}",
-                        result.task_id, peer_id, result.exit_code
+                        "project result {} from {} exit={} ({}ms)",
+                        result.task_id, peer_id, result.exit_code, result.execution_time_ms
                     );
                     self.project_client.record_result(result);
                 }

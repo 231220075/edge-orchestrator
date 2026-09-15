@@ -404,3 +404,238 @@ async fn project_task_roundtrip_via_request_response() {
     assert_eq!(result.stdout, b"mock-done");
     assert_eq!(result.exit_code, 0);
 }
+
+/// Executor that takes its time, like a real VM boot + build, and reports when
+/// execution actually starts.
+struct SlowExecutor {
+    node_id: uuid::Uuid,
+    delay: Duration,
+    started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[async_trait::async_trait]
+impl p2p::ProjectExecutor for SlowExecutor {
+    async fn run(
+        &self,
+        task: eo_core::types::ProjectTask,
+    ) -> anyhow::Result<eo_core::types::ProjectResult> {
+        if let Ok(mut slot) = self.started.lock() {
+            if let Some(tx) = slot.take() {
+                let _ = tx.send(());
+            }
+        }
+        tokio::time::sleep(self.delay).await;
+        Ok(eo_core::types::ProjectResult {
+            task_id: task.task_id,
+            exit_code: 0,
+            stdout: b"slow-done".to_vec(),
+            stderr: Vec::new(),
+            execution_time_ms: self.delay.as_millis() as u64,
+            executed_on: self.node_id,
+        })
+    }
+}
+
+/// Regression test for the "executor runs inline on the swarm event loop" bug.
+///
+/// A project job takes minutes in production (VM boot + toolchain install +
+/// build). If the acceptor runs it inline, its swarm event loop is parked for
+/// the whole job: it cannot answer any other request, and the connection that
+/// must carry the result can be torn down. This test pins the invariant that
+/// while a job is in flight, the acceptor still serves other requests promptly.
+#[tokio::test]
+async fn project_execution_does_not_block_the_swarm_event_loop() {
+    let executor_delay = Duration::from_secs(4);
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Executor node (the acceptor).
+    let keypair2 = identity::Keypair::generate_ed25519();
+    let peer2 = keypair2.public().to_peer_id();
+    let h2 = new_swarm(
+        keypair2,
+        SwarmConfig {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            bootstrap_peers: Vec::new(),
+        },
+        make_test_descriptor(),
+        None,
+        Some(std::sync::Arc::new(SlowExecutor {
+            node_id: uuid::Uuid::new_v4(),
+            delay: executor_delay,
+            started: std::sync::Mutex::new(Some(started_tx)),
+        })),
+    )
+    .unwrap();
+    let mut ev2 = h2.events;
+    let addr2 = loop {
+        match timeout(Duration::from_secs(10), ev2.recv()).await {
+            Ok(Some(Event::NewListenAddr { address })) => break address,
+            Ok(Some(_)) => continue,
+            _ => panic!("no listen address from the executor node"),
+        }
+    };
+
+    // Master node: connects outbound, then submits and polls.
+    let keypair1 = identity::Keypair::generate_ed25519();
+    let h1 = new_swarm(
+        keypair1,
+        SwarmConfig {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            bootstrap_peers: vec![addr2],
+        },
+        make_test_descriptor(),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut ev1 = h1.events;
+    loop {
+        match timeout(Duration::from_secs(15), ev1.recv()).await {
+            Ok(Some(Event::PeerConnected { peer_id })) if peer_id == peer2 => break,
+            Ok(Some(_)) => continue,
+            _ => panic!("master never connected to the executor node"),
+        }
+    }
+
+    h1.commands
+        .send(p2p::SwarmCommand::SendProjectTask {
+            peer_id: peer2,
+            task: eo_core::types::ProjectTask {
+                task_id: uuid::Uuid::new_v4(),
+                snapshot: eo_core::types::ProjectSnapshot {
+                    hash: "tarhash".into(),
+                    tar_bytes: b"tar".to_vec(),
+                },
+                work_dir: "/root/proj".into(),
+                build_cmd: vec!["make".into()],
+                run_cmd: vec!["./app".into()],
+                timeout_ms: 30_000,
+                resource_limits: eo_core::types::ResourceLimits::default(),
+                pinned_node: None,
+            },
+        })
+        .await
+        .unwrap();
+
+    // The job is now running: only the detached-task design delivers this, since
+    // it lets the event loop return to `select!` while `run` is in flight.
+    timeout(Duration::from_secs(10), started_rx)
+        .await
+        .expect("executor never started the task")
+        .expect("executor dropped the started signal");
+
+    // While the job runs, the acceptor must still answer an already-connected
+    // peer: with inline execution its loop is parked inside `run` and cannot even
+    // observe this request, let alone answer it.
+    let responded = timeout(executor_delay / 2, async {
+        h1.commands
+            .send(p2p::SwarmCommand::RequestDescriptor { peer_id: peer2 })
+            .await
+            .unwrap();
+        loop {
+            match ev1.recv().await {
+                Some(Event::DescriptorReceived { peer_id, .. }) if peer_id == peer2 => break,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await;
+    assert!(
+        responded.is_ok(),
+        "acceptor did not answer a descriptor request while executing a project task: \
+         the project executor is blocking the swarm event loop"
+    );
+
+    // The job's own result must still arrive afterwards.
+    let result = loop {
+        match timeout(Duration::from_secs(15), ev1.recv()).await {
+            Ok(Some(Event::ProjectResultReceived { result, .. })) => break result,
+            Ok(Some(_)) => continue,
+            _ => panic!("no project result"),
+        }
+    };
+    assert_eq!(result.stdout, b"slow-done");
+    assert_eq!(result.exit_code, 0);
+}
+
+/// A node without a project executor must reject the task explicitly instead of
+/// swallowing it: a dropped request leaves the master polling `pending` forever.
+#[tokio::test]
+async fn project_task_without_executor_is_rejected() {
+    let keypair2 = identity::Keypair::generate_ed25519();
+    let peer2 = keypair2.public().to_peer_id();
+    let h2 = new_swarm(
+        keypair2,
+        SwarmConfig {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            bootstrap_peers: Vec::new(),
+        },
+        make_test_descriptor(),
+        None,
+        None, // no project executor
+    )
+    .unwrap();
+    let mut ev2 = h2.events;
+    let addr2 = loop {
+        match timeout(Duration::from_secs(5), ev2.recv()).await {
+            Ok(Some(Event::NewListenAddr { address })) => break address,
+            Ok(Some(_)) => continue,
+            _ => panic!("no listen"),
+        }
+    };
+
+    let keypair1 = identity::Keypair::generate_ed25519();
+    let h1 = new_swarm(
+        keypair1,
+        SwarmConfig {
+            listen_addresses: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
+            bootstrap_peers: vec![addr2],
+        },
+        make_test_descriptor(),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut ev1 = h1.events;
+    loop {
+        match timeout(Duration::from_secs(10), ev1.recv()).await {
+            Ok(Some(Event::Identified { peer_id, .. })) if peer_id == peer2 => break,
+            Ok(Some(_)) => continue,
+            _ => panic!("master never identified the executor node"),
+        }
+    }
+    h1.commands
+        .send(p2p::SwarmCommand::SendProjectTask {
+            peer_id: peer2,
+            task: eo_core::types::ProjectTask {
+                task_id: uuid::Uuid::new_v4(),
+                snapshot: eo_core::types::ProjectSnapshot {
+                    hash: "tarhash".into(),
+                    tar_bytes: b"tar".to_vec(),
+                },
+                work_dir: "/root/proj".into(),
+                build_cmd: vec![],
+                run_cmd: vec![],
+                timeout_ms: 5000,
+                resource_limits: eo_core::types::ResourceLimits::default(),
+                pinned_node: None,
+            },
+        })
+        .await
+        .unwrap();
+
+    let result = loop {
+        match timeout(Duration::from_secs(10), ev1.recv()).await {
+            Ok(Some(Event::ProjectResultReceived { result, .. })) => break result,
+            Ok(Some(_)) => continue,
+            _ => panic!("no rejection response: the task was silently dropped"),
+        }
+    };
+    assert_eq!(result.exit_code, 101);
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("no project executor"),
+        "unexpected rejection reason: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

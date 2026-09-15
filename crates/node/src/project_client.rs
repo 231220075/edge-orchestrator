@@ -4,14 +4,32 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use eo_core::error::{CoreError, Result};
 use eo_core::types::{NodeDescriptor, NodeId, ProjectResult, ProjectTask, ResourceLimits, TaskId};
 use tokio::sync::mpsc;
+use tracing::info;
 
 use crate::project_snapshot::snapshot_from_dir;
 use crate::raft::network::RaftIdRegistry;
 use crate::raft::state_machine::ClusterState;
+
+/// How long a task may stay dispatched before the master declares it failed.
+/// The executor's own request-response window is 1800s; the grace period is that
+/// plus slack, so a task can never be pending forever.
+const RESULT_GRACE: Duration = Duration::from_secs(1920);
+
+/// Lifecycle of a submitted project task on the master side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskState {
+    /// Packed and handed to the swarm; no result yet.
+    Dispatched,
+    /// Terminal failure that is known before (or instead of) a result.
+    Failed(String),
+    /// Terminal success/failure reported by the executor.
+    Done,
+}
 
 /// How a master resolves a target node to a libp2p PeerId.
 pub enum Catalog {
@@ -30,6 +48,9 @@ pub struct ProjectClient {
     swarm_commands: mpsc::Sender<p2p::SwarmCommand>,
     catalog: Catalog,
     results: Arc<Mutex<HashMap<TaskId, ProjectResult>>>,
+    /// task_id -> (state, dispatched_at). Lets `fetch_project_result` report
+    /// something more useful than a bare `pending`.
+    tasks: Arc<Mutex<HashMap<TaskId, (TaskState, Instant)>>>,
     self_node_id: NodeId,
 }
 
@@ -44,6 +65,7 @@ impl ProjectClient {
             swarm_commands,
             catalog,
             results,
+            tasks: Arc::new(Mutex::new(HashMap::new())),
             self_node_id,
         }
     }
@@ -114,6 +136,7 @@ impl ProjectClient {
         target: Option<NodeId>,
     ) -> Result<TaskId> {
         let snapshot = snapshot_from_dir(Path::new(local_dir))?;
+        let task_size = snapshot.tar_bytes.len();
         let peer_id = self.resolve_peer(target)?;
         let task_id = uuid::Uuid::new_v4();
         let task = ProjectTask {
@@ -130,11 +153,30 @@ impl ProjectClient {
             .send(p2p::SwarmCommand::SendProjectTask { peer_id, task })
             .await
             .map_err(|e| CoreError::Network(format!("send project task: {e}")))?;
+        info!(
+            "project {task_id}: dispatched to peer {peer_id} (snapshot {} bytes, work_dir={work_dir}, \
+             timeout={timeout_ms}ms); polling from here on",
+            task_size
+        );
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.insert(task_id, (TaskState::Dispatched, Instant::now()));
+        }
         Ok(task_id)
     }
 
     /// Record a result pushed back by an executor.
     pub fn record_result(&self, result: ProjectResult) {
+        info!(
+            "project {}: result received (exit={}, {}ms, {} stdout / {} stderr bytes)",
+            result.task_id,
+            result.exit_code,
+            result.execution_time_ms,
+            result.stdout.len(),
+            result.stderr.len()
+        );
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.insert(result.task_id, (TaskState::Done, Instant::now()));
+        }
         if let Ok(mut map) = self.results.lock() {
             map.insert(result.task_id, result);
         }
@@ -146,6 +188,37 @@ impl ProjectClient {
             .lock()
             .ok()
             .and_then(|m| m.get(task_id).cloned())
+    }
+
+    /// Lifecycle state of a task, for status reporting over IPC.
+    ///
+    /// A dispatched task that outlives [`RESULT_GRACE`] is reported as failed
+    /// rather than staying `pending` forever: without this, a request that is
+    /// never answered (executor offline, protocol timeout) is indistinguishable
+    /// from a slow build.
+    pub fn task_status(&self, task_id: &TaskId) -> TaskState {
+        let Ok(tasks) = self.tasks.lock() else {
+            return TaskState::Failed("project client state poisoned".into());
+        };
+        let Some((state, dispatched_at)) = tasks.get(task_id) else {
+            return TaskState::Failed(format!("unknown task_id {task_id}"));
+        };
+        match state {
+            TaskState::Dispatched if dispatched_at.elapsed() > RESULT_GRACE => TaskState::Failed(
+                format!(
+                    "no result within {}s (executor did not answer: check the execution node's \
+                     logs and whether its project executor is reachable)",
+                    RESULT_GRACE.as_secs()
+                ),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    /// Number of tasks this client has dispatched (observability only).
+    #[allow(dead_code)]
+    pub fn tracked_tasks(&self) -> usize {
+        self.tasks.lock().map(|t| t.len()).unwrap_or(0)
     }
 }
 

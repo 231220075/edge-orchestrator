@@ -336,6 +336,22 @@ impl JsonRpcHandler {
         let task_id = uuid::Uuid::parse_str(&p.task_id)
             .map_err(|e| json_rpc_error(-32602, format!("invalid task_id: {e}")))?;
 
+        // Report the real lifecycle state instead of collapsing everything that
+        // is not a stored result into "pending": a failed dispatch, an executor
+        // rejection, or a request nobody ever answered must be distinguishable
+        // from a slow build, otherwise the client polls until it gives up.
+        match client.task_status(&task_id) {
+            crate::project_client::TaskState::Failed(msg) => {
+                warn!("fetch_project_result {task_id}: failed: {msg}");
+                return Ok(serde_json::json!({
+                    "status": "failed",
+                    "error": msg,
+                }));
+            }
+            crate::project_client::TaskState::Done => {}
+            crate::project_client::TaskState::Dispatched => {}
+        }
+
         match client.get_result(&task_id) {
             Some(r) => {
                 use base64::Engine;

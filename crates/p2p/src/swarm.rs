@@ -1,15 +1,16 @@
 //! Swarm manager — spawns the libp2p [`Swarm`] on a tokio task and
 //! translates its raw events into application-level [`Event`]s.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use eo_core::error::Result;
-use eo_core::types::{NodeDescriptor, ProjectResult, ProjectTask};
+use eo_core::types::{NodeDescriptor, ProjectResult, ProjectTask, TaskId};
 use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{identify, identity, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::behaviour::{EdgeOrchBehaviour, EdgeOrchBehaviourEvent};
 use crate::discovery::Event;
@@ -104,6 +105,9 @@ pub fn new_swarm(
 
     let (event_tx, event_rx) = mpsc::channel(256);
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
+    // Finished project jobs come back through this channel: only the event loop
+    // may call `Behaviour::send_response`, so the job cannot answer by itself.
+    let (project_tx, project_rx) = mpsc::channel::<ProjectOutcome>(8);
 
     tokio::spawn(async move {
         let bootstrap_peers = config.bootstrap_peers.clone();
@@ -116,6 +120,8 @@ pub fn new_swarm(
             bootstrap_peers,
             blob_provider,
             project_executor,
+            project_tx,
+            project_rx,
         )
         .await;
     });
@@ -142,7 +148,14 @@ async fn run_event_loop(
     bootstrap_peers: Vec<Multiaddr>,
     blob_provider: Option<std::sync::Arc<dyn BlobProvider>>,
     project_executor: Option<std::sync::Arc<dyn ProjectExecutor>>,
+    project_tx: mpsc::Sender<ProjectOutcome>,
+    mut project_rx: mpsc::Receiver<ProjectOutcome>,
 ) {
+    // Response channels of project jobs still running, keyed by task id. The
+    // event loop stays free while a job runs; the job hands its result back here.
+    let mut pending: HashMap<TaskId, libp2p::request_response::ResponseChannel<ProjectResult>> =
+        HashMap::new();
+
     // Dial every explicitly-configured bootstrap peer once at startup. This
     // guarantees a full mesh even when mDNS races or a LAN is flaky.
     info!("Bootstrap peers configured: {}", bootstrap_peers.len());
@@ -169,7 +182,7 @@ async fn run_event_loop(
                         vec![Event::PeerConnected { peer_id }]
                     }
                     Some(SwarmEvent::Behaviour(event)) => {
-                        handle_behaviour_event(event, self_peer_id, &self_descriptor, &mut swarm, blob_provider.as_deref(), project_executor.as_deref()).await
+                        handle_behaviour_event(event, self_peer_id, &self_descriptor, &mut swarm, blob_provider.as_deref(), project_executor.clone(), &event_tx, &project_tx, &mut pending).await
                     }
                     Some(_) => Vec::new(),
                     None => break,
@@ -180,6 +193,28 @@ async fn run_event_loop(
                         debug!("Event receiver dropped, shutting down swarm event loop");
                         break;
                     }
+                }
+            }
+
+            Some(outcome) = project_rx.recv() => {
+                let task_id = outcome.task_id;
+                let channel = pending.remove(&task_id);
+                if let Some(ch) = channel {
+                    if let Err(res) = swarm
+                        .behaviour_mut()
+                        .project_exchange
+                        .send_response(ch, outcome.result)
+                    {
+                        tracing::warn!(
+                            "project task {task_id}: response channel closed before delivery \
+                             (exit={})",
+                            res.exit_code
+                        );
+                    }
+                } else {
+                    // Very unlikely: the job finished before the event loop
+                    // registered the channel. Fail loudly instead of silently.
+                    error!("project task {task_id}: finished with no pending response channel");
                 }
             }
 
@@ -225,13 +260,17 @@ async fn run_event_loop(
 // Behaviour event handlers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_behaviour_event(
     event: EdgeOrchBehaviourEvent,
     self_peer_id: PeerId,
     self_descriptor: &NodeDescriptor,
     swarm: &mut EdgeOrchSwarm,
     blob_provider: Option<&dyn BlobProvider>,
-    project_executor: Option<&dyn ProjectExecutor>,
+    project_executor: Option<std::sync::Arc<dyn ProjectExecutor>>,
+    event_tx: &mpsc::Sender<Event>,
+    project_tx: &mpsc::Sender<ProjectOutcome>,
+    pending: &mut HashMap<TaskId, libp2p::request_response::ResponseChannel<ProjectResult>>,
 ) -> Vec<Event> {
     match event {
         EdgeOrchBehaviourEvent::Mdns(mdns_event) => match mdns_event {
@@ -290,7 +329,7 @@ async fn handle_behaviour_event(
                 .collect::<Vec<Event>>()
         }
         EdgeOrchBehaviourEvent::ProjectExchange(pe) => {
-            handle_project_exchange(pe, swarm, project_executor)
+            handle_project_exchange(pe, swarm, project_executor, event_tx, project_tx, pending)
                 .await
                 .into_iter()
                 .collect::<Vec<Event>>()
@@ -300,10 +339,52 @@ async fn handle_behaviour_event(
     }
 }
 
+/// Failure result for a project task that could not be executed.
+fn project_failure(task: &ProjectTask, exit_code: i32, msg: String) -> ProjectResult {
+    ProjectResult {
+        task_id: task.task_id,
+        exit_code,
+        stdout: Vec::new(),
+        stderr: msg.into_bytes(),
+        execution_time_ms: 0,
+        executed_on: uuid::Uuid::nil(),
+    }
+}
+
+/// A finished project job, handed back to the event loop for the response.
+struct ProjectOutcome {
+    task_id: TaskId,
+    result: ProjectResult,
+}
+
+/// Handle an incoming project task.
+///
+/// The execution itself is long (VM boot + toolchain install + build + run:
+/// tens of seconds to minutes) so it must NOT run on the swarm event loop: while
+/// the loop is parked inside the job it processes no other event, which starves
+/// every other protocol on that node (descriptor, raft, blob) and can tear down
+/// the very connection that has to carry the result.
+///
+/// Therefore this handler returns immediately: it parks the request's response
+/// channel in a pending map and spawns the job. When the job finishes it hands
+/// the result back to the event loop, which is the only place allowed to call
+/// `Behaviour::send_response`.
+///
+/// Awaiting the job here — even on a spawned task while awaiting only a oneshot —
+/// does NOT work: the response channel is just a sender into the request-response
+/// handler, so the response is only written when the swarm is polled again. Any
+/// await of the job inside the event loop keeps the whole node (this protocol,
+/// descriptor exchange, raft, blob) frozen for the duration of the build.
+///
+/// Every terminal outcome must produce a response: a silently dropped request
+/// leaves the master polling `pending` until the 1800s protocol timeout.
 async fn handle_project_exchange(
     event: libp2p::request_response::Event<ProjectTask, ProjectResult>,
     swarm: &mut EdgeOrchSwarm,
-    project_executor: Option<&dyn ProjectExecutor>,
+    project_executor: Option<std::sync::Arc<dyn ProjectExecutor>>,
+    event_tx: &mpsc::Sender<Event>,
+    project_tx: &mpsc::Sender<ProjectOutcome>,
+    pending: &mut HashMap<TaskId, libp2p::request_response::ResponseChannel<ProjectResult>>,
 ) -> Option<Event> {
     use libp2p::request_response::{Event as RREvent, Message};
     match event {
@@ -311,35 +392,84 @@ async fn handle_project_exchange(
             Message::Request {
                 request, channel, ..
             } => {
-                if let Some(executor) = project_executor {
-                    let result = executor.run(request.clone()).await;
-                    match result {
+                let task_id = request.task_id;
+                let Some(ex) = project_executor else {
+                    let msg = "no project executor on this node (Linux+KVM required); \
+                               task rejected instead of silently dropped"
+                        .to_string();
+                    warn!("project task {task_id} from {peer} rejected: {msg}");
+                    let _ = swarm
+                        .behaviour_mut()
+                        .project_exchange
+                        .send_response(channel, project_failure(&request, 101, msg));
+                    return None;
+                };
+
+                info!(
+                    "project task {task_id} accepted from {peer} (snapshot {} bytes, work_dir={}, \
+                     timeout={}ms, build={:?}, run={:?})",
+                    request.snapshot.tar_bytes.len(),
+                    request.work_dir,
+                    request.timeout_ms,
+                    request.build_cmd,
+                    request.run_cmd
+                );
+
+                // Run the minutes-long job on a detached task and let the event
+                // loop keep running: the result travels back as a ProjectOutcome
+                // and the loop completes the request-response transaction.
+                let forward_tx = event_tx.clone();
+                let outcome_tx = project_tx.clone();
+                // Register the response channel first, then spawn: the job can
+                // only finish after this, so the loop always finds the channel.
+                pending.insert(task_id, channel);
+                tokio::spawn(async move {
+                    let result = match ex.run(request.clone()).await {
                         Ok(res) => {
-                            let _ = swarm
-                                .behaviour_mut()
-                                .project_exchange
-                                .send_response(channel, res);
+                            info!(
+                                "project task {task_id} finished: exit={} ({}ms)",
+                                res.exit_code, res.execution_time_ms
+                            );
+                            res
                         }
                         Err(e) => {
-                            let res = ProjectResult {
-                                task_id: request.task_id,
-                                exit_code: 1,
-                                stdout: Vec::new(),
-                                stderr: format!("{e:#}").into_bytes(),
-                                execution_time_ms: 0,
-                                executed_on: uuid::Uuid::nil(),
-                            };
-                            let _ = swarm
-                                .behaviour_mut()
-                                .project_exchange
-                                .send_response(channel, res);
+                            error!("project task {task_id} failed: {e:#}");
+                            project_failure(&request, 1, format!("{e:#}"))
                         }
+                    };
+                    // Log the output tail: without it a failing build is
+                    // invisible on the execution node.
+                    if result.exit_code == 0 {
+                        info!("project task {task_id} stdout tail: {}", tail(&result.stdout, 3));
+                    } else {
+                        warn!(
+                            "project task {task_id} exit={} stdout tail: {}",
+                            result.exit_code,
+                            tail(&result.stdout, 5)
+                        );
+                        warn!("project task {task_id} stderr tail: {}", tail(&result.stderr, 10));
                     }
-                }
-                Some(Event::ProjectTaskReceived {
-                    peer_id: peer,
-                    task: request,
-                })
+                    let _ = forward_tx
+                        .send(Event::ProjectResultReceived {
+                            peer_id: peer,
+                            result: result.clone(),
+                        })
+                        .await;
+                    if outcome_tx
+                        .send(ProjectOutcome {
+                            task_id,
+                            result: result.clone(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        error!(
+                            "project task {task_id}: event loop gone, result (exit={}) dropped",
+                            result.exit_code
+                        );
+                    }
+                });
+                None
             }
             Message::Response { response, .. } => Some(Event::ProjectResultReceived {
                 peer_id: peer,
@@ -356,6 +486,14 @@ async fn handle_project_exchange(
         }
         RREvent::ResponseSent { .. } => None,
     }
+}
+
+/// Last `n` lines of a byte buffer, lossily decoded (for log tails).
+fn tail(bytes: &[u8], n: usize) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join(" | ")
 }
 
 fn handle_blob_exchange(

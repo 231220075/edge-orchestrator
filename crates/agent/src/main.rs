@@ -360,7 +360,7 @@ async fn submit_and_wait(args: &RunArgs, info: &WorkspaceInfo, plan: &Plan) -> R
         .context("submit_project returned no task_id")?
         .to_string();
     eprintln!(
-        "[eo-agent] submitted task {task_id}; waiting (cold VM boot + toolchain install can take ~1-2 min)..."
+        "[eo-agent] submitted task {task_id}; waiting (cold VM boot + toolchain install can take ~1-2 min)"
     );
     for i in 0..600 {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -370,14 +370,31 @@ async fn submit_and_wait(args: &RunArgs, info: &WorkspaceInfo, plan: &Plan) -> R
             jmacro!({ "task_id": task_id }),
         )
         .await?;
-        if r["status"] == "completed" {
-            return Ok(r);
-        }
-        if i % 5 == 4 {
-            eprintln!("[eo-agent] still running... {}s", (i + 1) * 3);
+        match r["status"].as_str().unwrap_or("pending") {
+            "completed" => return Ok(r),
+            // The node now reports terminal failures explicitly (unknown task,
+            // no reachable executor, no result within the protocol window).
+            // Bail out with the reason instead of polling to the 30-min deadline.
+            "failed" => {
+                anyhow::bail!(
+                    "task {task_id} failed on the cluster: {}",
+                    r["error"].as_str().unwrap_or("<no reason given>")
+                );
+            }
+            other => {
+                if i % 5 == 4 && !args.json {
+                    eprintln!(
+                        "[eo-agent] still running... {}s (status={other})",
+                        (i + 1) * 3
+                    );
+                }
+            }
         }
     }
-    anyhow::bail!("timed out after 30 min waiting for project result")
+    anyhow::bail!(
+        "timed out after 30 min waiting for project result of task {task_id}; \
+         check the node logs of the executing node (look for 'project task ... accepted')"
+    )
 }
 
 fn decode(b64: &str) -> String {

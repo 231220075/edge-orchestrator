@@ -3,7 +3,7 @@
 //! These events are produced by the swarm event loop and consumed
 //! by the node's bootstrap and orchestration layers.
 
-use eo_core::types::{NodeDescriptor, ProjectResult, ProjectTask};
+use eo_core::types::{NodeDescriptor, ProjectResult};
 use libp2p::PeerId;
 
 /// Application-level events emitted by the P2P swarm.
@@ -66,9 +66,6 @@ pub enum Event {
         /// The peer.
         peer_id: PeerId,
     },
-
-    /// An incoming project execution task from master.
-    ProjectTaskReceived { peer_id: PeerId, task: ProjectTask },
 
     /// Result of a project execution returned from an executor.
     ProjectResultReceived {
