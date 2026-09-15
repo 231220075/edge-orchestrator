@@ -59,3 +59,27 @@
 4. 长 socket 测试路径在 macOS 超过 SUN_LEN -> 测试改用 /tmp 短路径。
 
 说明：本项目设计下，agent 的 --socket 必须指向“与 agent 同主机”的节点（同机直连或 Mac 上的轻客户端节点），因为项目目录由该节点打包。
+
+
+## 第三轮修复：轮询无输出 + LLM 配置机制
+
+### “卡住”的真相
+未配置 LLM 时不会调用 LLM（走启发式），所以那不是 LLM 卡住。真正原因是 submit_and_wait 每 3s 轮询一次、期间不打印任何东西，而首次任务要冷启动 VM + 装 gcc（约 90s），看起来像卡死。
+
+修复：
+- 提交后打印 task_id 与说明；
+- 每 15s 打印一次 still running... Ns；
+- 30 分钟超时后给出明确错误。
+
+### LLM API Key 配置机制
+- 优先级：环境变量 > 配置文件；
+- 支持 EO_LLM_BASE_URL / EO_LLM_API_KEY / EO_LLM_MODEL，以及 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL 别名；
+- 配置文件默认 ~/.config/eo-agent/config.env（KEY=VALUE），可用 EO_AGENT_CONFIG 覆盖；
+- 若配置文件对 group/other 可读会打印告警并提示 chmod 600；
+- key 只通过 curl 参数传递，不写入日志（启动日志只显示 key=set/none）；
+- 模板见 configs/eo-agent.env.example；
+- 本地无鉴权端点（如 Ollama）可留空 api_key。
+
+### 新增 --dry-run
+只打印计划不提交，便于区分“计划问题”和“执行问题”（本地即可验证，无需集群）。
+

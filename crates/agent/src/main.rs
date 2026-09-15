@@ -2,6 +2,7 @@
 //! via the node IPC, then analyze the result. A thin deterministic workflow
 //! with two optional LLM steps (plan, analyze).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -50,6 +51,9 @@ struct RunArgs {
     /// Emit machine-readable JSON only.
     #[arg(long)]
     json: bool,
+    /// Print the plan and exit without submitting.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -161,17 +165,116 @@ fn heuristic_plan(info: &WorkspaceInfo) -> Plan {
     }
 }
 
+/// Resolved LLM settings (OpenAI-compatible).
+#[derive(Debug, Clone)]
+struct LlmConfig {
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+/// Optional config file: KEY=VALUE lines (like a .env).
+fn config_path() -> PathBuf {
+    if let Ok(p) = std::env::var("EO_AGENT_CONFIG") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config/eo-agent/config.env")
+}
+
+#[cfg(unix)]
+fn warn_if_public(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o077 != 0 {
+            eprintln!(
+                "[eo-agent] warning: {} is readable by others (mode {:o}); run: chmod 600 {}",
+                path.display(),
+                mode & 0o777,
+                path.display()
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_public(_path: &Path) {}
+
+fn read_config_file() -> HashMap<String, String> {
+    let path = config_path();
+    let mut map = HashMap::new();
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return map;
+    };
+    warn_if_public(&path);
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            map.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
+        }
+    }
+    map
+}
+
+/// Env var (or alias) first, then the config file.
+fn pick(file: &HashMap<String, String>, key: &str, aliases: &[&str]) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    for a in aliases {
+        if let Ok(v) = std::env::var(a) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    if let Some(v) = file.get(key) {
+        if !v.is_empty() {
+            return Some(v.clone());
+        }
+    }
+    for a in aliases {
+        if let Some(v) = file.get(*a) {
+            if !v.is_empty() {
+                return Some(v.clone());
+            }
+        }
+    }
+    None
+}
+
+fn llm_config() -> Option<LlmConfig> {
+    let file = read_config_file();
+    let base_url = pick(&file, "EO_LLM_BASE_URL", &["OPENAI_BASE_URL"])?;
+    let api_key = pick(&file, "EO_LLM_API_KEY", &["OPENAI_API_KEY"]).unwrap_or_default();
+    let model =
+        pick(&file, "EO_LLM_MODEL", &["OPENAI_MODEL"]).unwrap_or_else(|| "gpt-4o-mini".to_string());
+    Some(LlmConfig {
+        base_url,
+        api_key,
+        model,
+    })
+}
+
 fn llm_enabled() -> bool {
-    std::env::var("EO_LLM_BASE_URL").is_ok()
+    llm_config().is_some()
 }
 
 /// Minimal OpenAI-compatible chat call via curl (no extra HTTP dependency).
+/// The API key is only ever passed via the curl argument vector, never logged.
 fn llm_chat(system: &str, user: &str) -> Result<String> {
-    let base = std::env::var("EO_LLM_BASE_URL").context("EO_LLM_BASE_URL not set")?;
-    let key = std::env::var("EO_LLM_API_KEY").unwrap_or_default();
-    let model = std::env::var("EO_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+    let cfg =
+        llm_config().context("LLM not configured (set EO_LLM_BASE_URL or use a config file)")?;
     let body = jmacro!({
-        "model": model,
+        "model": cfg.model,
         "temperature": 0,
         "messages": [
             { "role": "system", "content": system },
@@ -179,19 +282,23 @@ fn llm_chat(system: &str, user: &str) -> Result<String> {
         ]
     })
     .to_string();
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let mut args: Vec<String> = vec![
+        "-sS".into(),
+        "-X".into(),
+        "POST".into(),
+        url,
+        "-H".into(),
+        "Content-Type: application/json".into(),
+    ];
+    if !cfg.api_key.is_empty() {
+        args.push("-H".into());
+        args.push(format!("Authorization: Bearer {}", cfg.api_key));
+    }
+    args.push("-d".into());
+    args.push(body);
     let out = Command::new("curl")
-        .args([
-            "-sS",
-            "-X",
-            "POST",
-            &format!("{}/chat/completions", base.trim_end_matches('/')),
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            &format!("Authorization: Bearer {key}"),
-            "-d",
-            &body,
-        ])
+        .args(&args)
         .output()
         .context("failed to run curl")?;
     if !out.status.success() {
@@ -252,7 +359,10 @@ async fn submit_and_wait(args: &RunArgs, info: &WorkspaceInfo, plan: &Plan) -> R
         .as_str()
         .context("submit_project returned no task_id")?
         .to_string();
-    for _ in 0..600 {
+    eprintln!(
+        "[eo-agent] submitted task {task_id}; waiting (cold VM boot + toolchain install can take ~1-2 min)..."
+    );
+    for i in 0..600 {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         let r = rpc(
             &args.socket,
@@ -263,8 +373,11 @@ async fn submit_and_wait(args: &RunArgs, info: &WorkspaceInfo, plan: &Plan) -> R
         if r["status"] == "completed" {
             return Ok(r);
         }
+        if i % 5 == 4 {
+            eprintln!("[eo-agent] still running... {}s", (i + 1) * 3);
+        }
     }
-    anyhow::bail!("timed out waiting for project result")
+    anyhow::bail!("timed out after 30 min waiting for project result")
 }
 
 fn decode(b64: &str) -> String {
@@ -388,6 +501,16 @@ async fn run(args: RunArgs) -> Result<()> {
     }
     let info = scan_workspace(&workspace)?;
 
+    match llm_config() {
+        Some(c) => eprintln!(
+            "[eo-agent] LLM: model={} base={} key={}",
+            c.model,
+            c.base_url,
+            if c.api_key.is_empty() { "none" } else { "set" }
+        ),
+        None => eprintln!("[eo-agent] LLM: disabled (heuristic planner)"),
+    }
+
     let mut plan = if llm_enabled() {
         match llm_plan(&info, args.goal.as_deref()) {
             Ok(p) => p,
@@ -399,6 +522,14 @@ async fn run(args: RunArgs) -> Result<()> {
     } else {
         heuristic_plan(&info)
     };
+
+    if args.dry_run {
+        println!(
+            "[eo-agent] plan: build={:?} run={:?} work_dir={}",
+            plan.build_cmd, plan.run_cmd, plan.work_dir
+        );
+        return Ok(());
+    }
 
     let attempts = args.max_attempts.max(1);
     let mut last = Value::Null;
@@ -544,6 +675,7 @@ mod tests {
             target_node: None,
             max_attempts: 1,
             json: true,
+            dry_run: false,
         };
         let info = WorkspaceInfo {
             root: PathBuf::from("."),
