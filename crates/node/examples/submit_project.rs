@@ -47,7 +47,10 @@ async fn main() {
             "work_dir": "/root/project",
             "build_cmd": build,
             "run_cmd": run,
-            "timeout_ms": 300000
+            // Cold path = image prep + VM boot + apt-get install + build + run.
+            // 300s is too tight: the guest's toolchain install alone can take a
+            // minute or more, and a timeout discards the apt output.
+            "timeout_ms": 900000
         }),
     )
     .await;

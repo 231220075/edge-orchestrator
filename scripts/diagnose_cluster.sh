@@ -82,11 +82,24 @@ submit() {  # submit <label> <build_cmd>
 }
 
 # Stage A: no toolchain work at all -> isolates "VM boot + upload + exec".
+# Expected stderr on success: "./app: No such file or directory" (exit 127),
+# because build_cmd=true never produces an app.
 submit "stage A: VM boot + upload + exec only (build_cmd = true)" "true"
 
-# Stage B: the real plan (apt install gcc + compile + run).
-BUILD="(command -v gcc >/dev/null 2>&1 || (DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc)) && gcc main.c -o app"
-submit "stage B: apt-get install gcc + compile + run" "$BUILD"
+# Stage B: is the guest able to reach the outside world at all? A failing/hanging
+# apt-get is the single most common reason this pipeline looks stuck, and with
+# `-qq` it stays silent, so probe explicitly and fail fast instead.
+# (no `timeout` binary is assumed: a watchdog subshell kills the command.)
+GUEST_TIMEOUT='run_t() { "$@" & p=$!; ( sleep ${TMO:-60}; kill -9 $p 2>/dev/null ) & w=$!; wait $p; s=$?; kill $w 2>/dev/null; return $s; }'
+submit "stage B: guest network probe (dns + tcp + apt, 60s each)" \
+  "$GUEST_TIMEOUT; echo '--- ip'; ip -4 addr show | grep -E 'inet |state'; echo '--- default route'; ip route | head -3; echo '--- resolv.conf'; cat /etc/resolv.conf; echo '--- ping gw'; TMO=10 run_t ping -c1 -W3 10.0.2.2 || true; echo '--- dns'; TMO=20 run_t getent hosts deb.debian.org || echo 'DNS FAILED'; echo '--- tcp 80'; TMO=20 run_t bash -c 'exec 3<>/dev/tcp/deb.debian.org/80' && echo 'TCP OK' || echo 'TCP FAILED'; echo '--- apt-get update (60s cap)'; TMO=60 run_t env DEBIAN_FRONTEND=noninteractive apt-get update && echo 'APT OK' || echo 'APT FAILED/TIMED OUT'; echo '-- probe done --'"
+
+# Stage C: the real plan, with the toolchain install CAPPED so a broken guest
+# network fails in ~90s with the apt output instead of burning the whole budget.
+APTX='DEBIAN_FRONTEND=noninteractive apt-get'
+CAPPED_INSTALL="if command -v gcc >/dev/null 2>&1; then echo gcc-present; else $APTX update 2>&1 | tail -5; $APTX install -y gcc 2>&1 | tail -5; fi"
+BUILD="(command -v gcc >/dev/null 2>&1 || (TMO=90 $GUEST_TIMEOUT; $CAPPED_INSTALL)) && gcc main.c -o app"
+submit "stage C: install gcc (capped) + compile + run" "$BUILD"
 
 section "4. where did it stop?"
 for f in "$LOG_DIR"/n*.log; do

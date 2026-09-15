@@ -427,8 +427,8 @@ async fn handle_project_exchange(
                     let result = match ex.run(request.clone()).await {
                         Ok(res) => {
                             info!(
-                                "project task {task_id} finished: exit={} ({}ms)",
-                                res.exit_code, res.execution_time_ms
+                                "project task {task_id} finished: exit={} ({}ms) on node {}",
+                                res.exit_code, res.execution_time_ms, res.executed_on
                             );
                             res
                         }

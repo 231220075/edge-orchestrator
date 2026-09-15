@@ -51,6 +51,21 @@ mod linux {
         share.min(cap).max(Duration::from_secs(1))
     }
 
+    /// Exit code for a guest command. A signal-terminated process has no exit
+    /// code; reporting that as 0 would hide every broken sandbox command.
+    fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
+        status.code().unwrap_or_else(|| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = status.signal() {
+                    return 128 + sig;
+                }
+            }
+            1
+        })
+    }
+
     fn deadline_in(ms: u64) -> Instant {
         Instant::now() + Duration::from_millis(ms)
     }
@@ -311,17 +326,10 @@ mod linux {
             out.stdout.extend_from_slice(&b.stdout);
             out.stderr.extend_from_slice(&b.stderr);
             if !b.status.success() {
-                out.exit_code = b.status.code().unwrap_or(1);
+                out.exit_code = exit_code_of(&b.status);
                 out.execution_time_ms = start.elapsed().as_millis() as u64;
                 return Ok(out);
             }
-        }
-
-        if start.elapsed().as_millis() as u64 > spec.timeout_ms {
-            out.exit_code = 124;
-            out.stderr.extend_from_slice(b"timeout exceeded");
-            out.execution_time_ms = start.elapsed().as_millis() as u64;
-            return Ok(out);
         }
 
         let run_cmd = format!("cd {work} && {}", spec.run_cmd.join(" "));
@@ -338,7 +346,9 @@ mod linux {
                 )));
             }
         };
-        out.exit_code = r.status.code().unwrap_or(0);
+        // NOT `unwrap_or(0)`: a signal-killed command has no exit code, and
+        // reporting that as success hid a failing `./app` behind exit 0.
+        out.exit_code = exit_code_of(&r.status);
         out.stdout.extend_from_slice(&r.stdout);
         out.stderr.extend_from_slice(&r.stderr);
         out.execution_time_ms = start.elapsed().as_millis() as u64;

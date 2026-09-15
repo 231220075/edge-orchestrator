@@ -351,7 +351,9 @@ async fn submit_and_wait(args: &RunArgs, info: &WorkspaceInfo, plan: &Plan) -> R
         "work_dir": plan.work_dir.clone(),
         "build_cmd": plan.build_cmd.clone(),
         "run_cmd": plan.run_cmd.clone(),
-        "timeout_ms": 300000,
+        // Cold path (image + VM boot + toolchain install) needs real headroom;
+        // 300s is enough to time out a slow apt-get.
+        "timeout_ms": 900000,
         "target_node": args.target_node.clone(),
     });
     let res = rpc(&args.socket, "submit_project", params).await?;
