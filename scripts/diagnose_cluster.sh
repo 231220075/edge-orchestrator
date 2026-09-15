@@ -82,24 +82,31 @@ submit() {  # submit <label> <build_cmd>
 }
 
 # Stage A: no toolchain work at all -> isolates "VM boot + upload + exec".
-# Expected stderr on success: "./app: No such file or directory" (exit 127),
-# because build_cmd=true never produces an app.
+# Expected: exit=1 with "./app: No such file or directory" on stderr, because
+# build_cmd=true never produces an app. (Before, a signal-killed command was
+# reported as exit 0.)
 submit "stage A: VM boot + upload + exec only (build_cmd = true)" "true"
 
 # Stage B: is the guest able to reach the outside world at all? A failing/hanging
-# apt-get is the single most common reason this pipeline looks stuck, and with
-# `-qq` it stays silent, so probe explicitly and fail fast instead.
-# (no `timeout` binary is assumed: a watchdog subshell kills the command.)
-GUEST_TIMEOUT='run_t() { "$@" & p=$!; ( sleep ${TMO:-60}; kill -9 $p 2>/dev/null ) & w=$!; wait $p; s=$?; kill $w 2>/dev/null; return $s; }'
-submit "stage B: guest network probe (dns + tcp + apt, 60s each)" \
-  "$GUEST_TIMEOUT; echo '--- ip'; ip -4 addr show | grep -E 'inet |state'; echo '--- default route'; ip route | head -3; echo '--- resolv.conf'; cat /etc/resolv.conf; echo '--- ping gw'; TMO=10 run_t ping -c1 -W3 10.0.2.2 || true; echo '--- dns'; TMO=20 run_t getent hosts deb.debian.org || echo 'DNS FAILED'; echo '--- tcp 80'; TMO=20 run_t bash -c 'exec 3<>/dev/tcp/deb.debian.org/80' && echo 'TCP OK' || echo 'TCP FAILED'; echo '--- apt-get update (60s cap)'; TMO=60 run_t env DEBIAN_FRONTEND=noninteractive apt-get update && echo 'APT OK' || echo 'APT FAILED/TIMED OUT'; echo '-- probe done --'"
+# apt-get is the most common reason this pipeline looks stuck, and `-qq` hides
+# its output, so probe explicitly.
+#
+# No `timeout` binary is assumed (minimal cloud images lack it): `run_t` is a
+# watchdog subshell. NOTE: `TMO=90 run_t ...` is correct, but `TMO=90 run_t() {}`
+# is NOT valid bash — a function definition cannot follow an assignment prefix.
+GUEST_LIB='run_t() { "$@" & p=$!; ( sleep ${TMO:-60}; kill -9 $p 2>/dev/null ) & w=$!; wait $p; s=$?; kill $w 2>/dev/null; return $s; }; apt_bin_update() { DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::IndexTargets::deb-src::DefaultEnabled=false update -qq; }; apt_install() { DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"; }'
 
-# Stage C: the real plan, with the toolchain install CAPPED so a broken guest
-# network fails in ~90s with the apt output instead of burning the whole budget.
-APTX='DEBIAN_FRONTEND=noninteractive apt-get'
-CAPPED_INSTALL="if command -v gcc >/dev/null 2>&1; then echo gcc-present; else $APTX update 2>&1 | tail -5; $APTX install -y gcc 2>&1 | tail -5; fi"
-BUILD="(command -v gcc >/dev/null 2>&1 || (TMO=90 $GUEST_TIMEOUT; $CAPPED_INSTALL)) && gcc main.c -o app"
-submit "stage C: install gcc (capped) + compile + run" "$BUILD"
+submit "stage B: guest network probe (dns + tcp + apt, watchdogs)" \
+  "$GUEST_LIB; echo '--- ip'; ip -4 addr show | grep -E 'inet |state'; echo '--- default route'; ip route | head -3; echo '--- resolv.conf'; cat /etc/resolv.conf; echo '--- ping gw'; TMO=10 run_t ping -c1 -W3 10.0.2.2 || true; echo '--- dns'; TMO=20 run_t getent hosts deb.debian.org || echo 'DNS FAILED'; echo '--- tcp 80'; TMO=20 run_t bash -c 'exec 3<>/dev/tcp/deb.debian.org/80' && echo 'TCP OK' || echo 'TCP FAILED'; echo '--- apt-get update, deb-src DISABLED (120s cap)'; TMO=120 run_t apt_bin_update && echo 'APT-BIN UPDATE OK' || echo 'APT-BIN UPDATE FAILED/TIMED OUT'; echo '--- apt-get update, deb-src enabled (120s cap)'; TMO=120 run_t apt-get update -qq && echo 'APT-FULL UPDATE OK' || echo 'APT-FULL UPDATE FAILED/TIMED OUT'; echo '-- probe done --'"
+
+# Stage C: the real plan. No deb-src indexes, apt output visible, bounded so a
+# broken guest fails fast instead of burning the whole task budget.
+BUILD="(command -v gcc >/dev/null 2>&1 || (TMO=180 run_t apt_install gcc && echo gcc-installed)) && gcc main.c -o app"
+submit "stage C: install gcc (deb-src off, 180s cap) + compile + run" "$GUEST_LIB; $BUILD"
+
+# Stage D: exactly what eo-agent's heuristic planner now generates.
+submit "stage D: eo-agent planner build_cmd" \
+  "$GUEST_LIB; (command -v gcc >/dev/null 2>&1 || (DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc >/dev/null 2>&1 || (DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::IndexTargets::deb-src::DefaultEnabled=false update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc))) && gcc main.c -o app"
 
 section "4. where did it stop?"
 for f in "$LOG_DIR"/n*.log; do

@@ -108,9 +108,23 @@ fn first_with_ext(info: &WorkspaceInfo, ext: &str) -> Option<String> {
     info.files.iter().find(|f| f.ends_with(ext)).cloned()
 }
 
+/// Install `pkg` if it is missing inside a fresh cloud image.
+///
+/// Two hard-won details (measured on a Debian trixie cloud image):
+///
+/// 1. `deb-src` entries make `apt-get update` download a ~10 MB `Sources` index,
+///    which alone can eat minutes on a shared link. We only need binaries, so the
+///    source indexes are disabled with an apt option instead of touching the
+///    image's sources.list;
+/// 2. prefer the index already baked into the image (`install` without `update`)
+///    and only update when that fails, so the common case pays no update at all.
 fn ensure_tool(pkg: &str) -> String {
+    const APT: &str = "DEBIAN_FRONTEND=noninteractive apt-get";
+    const NO_DEB_SRC: &str = "-o Acquire::IndexTargets::deb-src::DefaultEnabled=false";
     format!(
-        "(command -v {pkg} >/dev/null 2>&1 || (DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {pkg}))"
+        "(command -v {pkg} >/dev/null 2>&1 \
+          || ({APT} install -y -qq {pkg} >/dev/null 2>&1 \
+              || ({APT} {NO_DEB_SRC} update -qq && {APT} install -y -qq {pkg})))"
     )
 }
 
@@ -614,6 +628,23 @@ mod tests {
     fn extract_json_takes_object_slice() {
         let s = "noise { 1 } trailing";
         assert_eq!(extract_json(s), "{ 1 }");
+    }
+
+    #[test]
+    fn ensure_tool_avoids_source_indexes_and_tries_cache_first() {
+        let cmd = ensure_tool("gcc");
+        assert!(cmd.contains("command -v gcc"), "must stay idempotent: {cmd}");
+        assert!(
+            cmd.contains("APT::Acquire::IndexTargets::deb-src::DefaultEnabled=false")
+                || cmd.contains("IndexTargets::deb-src"),
+            "must not fetch the huge Sources index: {cmd}"
+        );
+        // The first attempt must not run `update` (image ships with lists).
+        let first_attempt = cmd.split("||").nth(1).unwrap_or("");
+        assert!(
+            !first_attempt.contains("update"),
+            "first attempt should use the baked index: {cmd}"
+        );
     }
 
     #[test]
