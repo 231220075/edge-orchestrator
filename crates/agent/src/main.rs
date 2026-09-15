@@ -108,23 +108,73 @@ fn first_with_ext(info: &WorkspaceInfo, ext: &str) -> Option<String> {
     info.files.iter().find(|f| f.ends_with(ext)).cloned()
 }
 
+/// Debian mirrors tried in order when the guest has to install something.
+///
+/// Order matters: the image defaults to `deb.debian.org`, which measured at tens
+/// of KB/s on this network, so the package index alone can take minutes. The
+/// Chinese mirrors come first and each is reachability-tested before use, so a
+/// guest without access to them falls back to the image default instead of
+/// breaking.
+const MIRRORS: &[&str] = &[
+    "https://mirrors.tuna.tsinghua.edu.cn/debian",
+    "https://mirrors.ustc.edu.cn/debian",
+    "https://mirrors.aliyun.com/debian",
+    "http://deb.debian.org/debian",
+];
+
+/// Shell snippet: pick the first reachable mirror, then repoint both source
+/// formats at it (deb822 `.sources` on trixie, plain `sources.list` on older
+/// images). Prints the choice so a failure is diagnosable from the task output.
+fn apt_mirror_setup() -> String {
+    let candidates = MIRRORS.join(" ");
+    format!(
+        r#"MIRROR=''; for m in {candidates}; do
+             if curl -sf -o /dev/null --max-time 8 "$m/dists/stable/Release" \
+             || curl -sf -o /dev/null --max-time 8 "$m/dists/trixie/Release"; then MIRROR="$m"; break; fi
+           done
+           if [ -n "$MIRROR" ]; then
+             for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do
+               [ -f "$f" ] || continue
+               sed -i.bak -E "s#https?://(deb|security|ftp)\.debian\.org/debian(-security)?#$MIRROR#g" "$f" && rm -f "$f.bak"
+             done
+             echo "apt mirror: $MIRROR"
+           else
+             echo "apt mirror: candidates unreachable, keeping the image default"
+           fi"#
+    )
+}
+
 /// Install `pkg` if it is missing inside a fresh cloud image.
 ///
-/// Two hard-won details (measured on a Debian trixie cloud image):
+/// Four hard-won details, all measured on a Debian trixie cloud image:
 ///
-/// 1. `deb-src` entries make `apt-get update` download a ~10 MB `Sources` index,
-///    which alone can eat minutes on a shared link. We only need binaries, so the
-///    source indexes are disabled with an apt option instead of touching the
-///    image's sources.list;
-/// 2. prefer the index already baked into the image (`install` without `update`)
-///    and only update when that fails, so the common case pays no update at all.
+/// 1. `deb-src` entries make `apt-get update` fetch a ~10 MB `Sources` index that
+///    binaries never need — disabled via an apt option;
+/// 2. a reused VM can carry apt locks left by a previous run that a timeout
+///    killed; a stale lock makes every later apt call fail in milliseconds with
+///    "Could not get lock", so the locks are cleared first;
+/// 3. `apt-get install` does not update by itself: without an index it fails with
+///    "Unable to locate package", so `update` runs whenever the index is missing;
+/// 4. the image's default mirror can be slow enough to make the index download
+///    take minutes, so a faster one is selected first (see [`MIRRORS`]).
 fn ensure_tool(pkg: &str) -> String {
     const APT: &str = "DEBIAN_FRONTEND=noninteractive apt-get";
     const NO_DEB_SRC: &str = "-o Acquire::IndexTargets::deb-src::DefaultEnabled=false";
+    let locks = "rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend";
+    let update = format!("{APT} {NO_DEB_SRC} update -qq || true");
+    let mirror = apt_mirror_setup();
     format!(
-        "(command -v {pkg} >/dev/null 2>&1 \
-          || ({APT} install -y -qq {pkg} >/dev/null 2>&1 \
-              || ({APT} {NO_DEB_SRC} update -qq && {APT} install -y -qq {pkg})))"
+        r#"(command -v {pkg} >/dev/null 2>&1 || (
+  {mirror}
+  {locks}
+  set -- /var/lib/apt/lists/*Packages*
+  if [ ! -e "$1" ]; then {update}; fi
+  {APT} install -y -qq {pkg} || (
+    {locks}
+    {update}
+    {APT} install -y -qq {pkg}
+  )
+))"#
     )
 }
 
@@ -630,21 +680,26 @@ mod tests {
         assert_eq!(extract_json(s), "{ 1 }");
     }
 
+    /// Prints the generated installer so it can be exercised against a stub
+    /// guest shell. Run with:
+    ///     cargo test -p eo-agent print_ensure_tool -- --nocapture --ignored
     #[test]
-    fn ensure_tool_avoids_source_indexes_and_tries_cache_first() {
+    #[ignore = "diagnostic helper, prints the generated command"]
+    fn print_ensure_tool() {
+        println!("{}", ensure_tool("tcc"));
+    }
+
+    #[test]
+    fn ensure_tool_is_robust_against_reused_vm_state() {
         let cmd = ensure_tool("gcc");
-        assert!(cmd.contains("command -v gcc"), "must stay idempotent: {cmd}");
-        assert!(
-            cmd.contains("APT::Acquire::IndexTargets::deb-src::DefaultEnabled=false")
-                || cmd.contains("IndexTargets::deb-src"),
-            "must not fetch the huge Sources index: {cmd}"
-        );
-        // The first attempt must not run `update` (image ships with lists).
-        let first_attempt = cmd.split("||").nth(1).unwrap_or("");
-        assert!(
-            !first_attempt.contains("update"),
-            "first attempt should use the baked index: {cmd}"
-        );
+        assert!(cmd.contains("command -v gcc"), "{cmd}");
+        assert!(cmd.contains("deb-src::DefaultEnabled=false"), "{cmd}");
+        assert!(cmd.contains("/var/lib/apt/lists/lock"), "{cmd}");
+        assert!(cmd.contains("/var/lib/dpkg/lock-frontend"), "{cmd}");
+        assert!(cmd.contains("*Packages*"), "must check for a list index: {cmd}");
+        assert!(cmd.contains("mirrors.tuna.tsinghua.edu.cn"), "{cmd}");
+        assert!(cmd.contains("deb.debian.org/debian"), "keep a fallback: {cmd}");
+        assert!(!cmd.contains("&& echo"), "must not swallow failures: {cmd}");
     }
 
     #[test]
