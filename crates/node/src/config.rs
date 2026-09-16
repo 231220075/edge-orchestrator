@@ -204,6 +204,19 @@ impl NodeConfig {
             .min(sandbox::MAX_POOL_TARGET)
     }
 
+    /// Apply command-line overrides for the project sandbox policy.
+    ///
+    /// Available on every platform on purpose: the value is validated (and
+    /// reported) wherever the config is loaded, and only *acts* on Linux+KVM.
+    pub fn apply_sandbox_overrides(&mut self, vm_mode: Option<&str>, pool_size: Option<usize>) {
+        if let Some(mode) = vm_mode {
+            self.capabilities.project_vm_mode = mode.to_string();
+        }
+        if let Some(size) = pool_size {
+            self.capabilities.project_vm_pool_size = size;
+        }
+    }
+
     /// Parsed `capabilities.project_sandbox` + `project_vm_mode`.
     ///
     /// Available on every platform so a bad value is reported wherever the config

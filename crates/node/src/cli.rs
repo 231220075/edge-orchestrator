@@ -38,4 +38,14 @@ pub struct Args {
     /// Directory for the CAS object store.
     #[arg(long, default_value = "~/.edge-orchestrator/objects")]
     pub store_dir: PathBuf,
+
+    /// Override the project sandbox VM lifecycle: "reuse" (one warm VM, tasks
+    /// share its disk) or "fresh" (a new machine per task, isolated).
+    /// Takes precedence over the config file.
+    #[arg(long)]
+    pub project_vm_mode: Option<String>,
+
+    /// Override how many idle VMs `fresh` mode pre-boots (0 disables pooling).
+    #[arg(long)]
+    pub project_vm_pool_size: Option<usize>,
 }

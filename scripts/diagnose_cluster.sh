@@ -153,16 +153,45 @@ echo "--- snapshot path evidence (master packs it, executor pulls it) ---"
 grep -hE "snapshot .* ready locally|cas: blob .* fetched|cas: requesting blob" "$LOG_DIR"/n*.log | tail -6
 rm -rf "$BIG"
 
-# Stage G: isolation semantics. Two probes in a row; in `fresh` mode the second
-# task must NOT see the first task's leftovers (a marker file under work_dir).
-# With the default `reuse` mode the marker DOES survive — that is the trade-off,
-# printed here so it is never a surprise.
-submit "stage G: isolation probe #1 (writes a marker)" "touch /root/project/marker-from-task-1"
-submit "stage G: isolation probe #2 (reads it back)" "ls -l /root/project/marker-from-task-1 2>&1 || echo MARKER-GONE"
-echo "--- isolation verdict (see the stderr of probe #2 above) ---"
-echo "    MARKER-GONE  => per-task isolation (project_vm_mode: fresh)"
-echo "    marker file  => VM reused, tasks share the overlay (project_vm_mode: reuse)"
-grep -hE "machine discarded \(fresh mode\)|pool refilled|mode=(Reuse|Fresh)|pool_target=" "$LOG_DIR"/n*.log | tail -5
+# Stage G: what does "isolation" actually mean here?
+#
+# The marker must live OUTSIDE work_dir: `execute_on_vm` runs `rm -rf <work_dir>`
+# before every task in BOTH modes, so a marker inside it disappears regardless and
+# would "pass" for the wrong reason (that mistake was made once already).
+#
+# So the probe writes /root/marker-* , which only a layer below the project dir can
+# erase — i.e. a different machine (fresh) vs the same one (reuse).
+ISOLATION_PROBE='M=/root/eo-isolation-marker'
+submit "stage G1: reuse-mode worker writes a marker outside work_dir" \
+  "echo reused > $ISOLATION_PROBE; echo wrote-$ISOLATION_PROBE"
+submit "stage G2: same worker reads it back" \
+  "test -f $ISOLATION_PROBE && echo MARKER-SURVIVED-reuse-is-not-isolated || echo MARKER-GONE-isolated"
+
+# Counter-example on dedicated nodes: fresh mode, no pool (so the machine cannot
+# be a leftover), leaving the user's own cluster config untouched.
+echo
+echo "--- stage G3: same probe on fresh-mode nodes (dedicated ports 391xx) ---"
+for i in 1 2 3; do
+  RUST_LOG=info ./target/debug/node \
+    --config "configs/cluster-node-$i.yaml" \
+    --listen-address /ip4/127.0.0.1/tcp/3910$i \
+    --store-dir "$LOG_DIR/fresh-n$i" \
+    --ipc-socket "$LOG_DIR/fresh-n$i.sock" \
+    --project-vm-mode fresh --project-vm-pool-size 0 \
+    > "$LOG_DIR/fresh-n$i.log" 2>&1 &
+done
+sleep 12
+if grep -q "vm_mode=Fresh" "$LOG_DIR"/fresh-n*.log 2>/dev/null; then
+  ./target/debug/examples/submit_project "$LOG_DIR/fresh-n1.sock" "$PROJ" \
+    "echo fresh > $ISOLATION_PROBE; echo wrote-$ISOLATION_PROBE" "./app" >/dev/null 2>&1 || true
+  ./target/debug/examples/submit_project "$LOG_DIR/fresh-n1.sock" "$PROJ" \
+    "test -f $ISOLATION_PROBE && echo MARKER-SURVIVED || echo MARKER-GONE-isolated" "./app" \
+    2>&1 | tail -2
+  grep -hE "machine discarded \(fresh mode\)|vm_mode=" "$LOG_DIR"/fresh-n*.log | tail -3
+else
+  echo "  (fresh-mode nodes did not start with the CLI overrides below; skipping)"
+fi
+pkill -f "cluster-node-.*3910" 2>/dev/null || true
 
 section "4. where did it stop?"
 for f in "$LOG_DIR"/n*.log; do

@@ -51,11 +51,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Bootstrap the node
-    let mut node = bootstrap::Node::bootstrap(
+    let mut node = bootstrap::Node::bootstrap_with_overrides(
         &args.config,
         args.node_id.as_deref(),
         ipc_socket_path.as_deref(),
         &store_dir,
+        args.project_vm_mode.as_deref(),
+        args.project_vm_pool_size,
     )
     .await?;
 

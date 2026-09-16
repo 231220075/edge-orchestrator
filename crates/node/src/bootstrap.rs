@@ -153,14 +153,21 @@ pub struct Node {
 }
 
 impl Node {
-    pub async fn bootstrap(
+    /// Bootstrap the node.
+    ///
+    /// The sandbox-policy overrides exist so an operator can compare `reuse` and
+    /// `fresh` without editing config files; `None` means "use the config".
+    pub async fn bootstrap_with_overrides(
         config_path: &Path,
         node_id_override: Option<&str>,
         ipc_socket_path: Option<&Path>,
         store_dir: &Path,
+        vm_mode: Option<&str>,
+        pool_size: Option<usize>,
     ) -> Result<Self> {
         // 1. Load config
         let mut config = NodeConfig::load(config_path)?;
+        config.apply_sandbox_overrides(vm_mode, pool_size);
         if let Some(id) = node_id_override {
             config.node_id = id.to_string();
         }
