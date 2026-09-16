@@ -46,7 +46,8 @@ echo "[1/5] cleanup"
 cleanup
 sleep 1
 
-echo "[2/5] build node + eo-agent"
+echo "[2/5] build gate + build"
+target_platform_build_check "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 cargo build -p node --quiet
 cargo build -p eo-agent --quiet
 

@@ -28,6 +28,23 @@
 - 解法（最佳实践）：在 with_machine 闭包内「构造并返回最终结果」，
   闭包 Output 直接是 ExecutionResult，外部只 await 拿值。不要闭包外定义可变结果再 share。
 
+## 第四次踩同一个坑（2025-09，VM 池/模板镜像那轮）
+
+- 现象：`error[E0728]: await is only allowed inside async functions and blocks`
+  —— worker 是同步函数，我却写了一个 `async { ... }` 块并以 `.await` 结尾（漏了 `block_on`）。
+  同一轮里还有一次把循环尾部整段覆盖掉（池动作 + `job.reply.send` 消失）。
+- 为什么本地全绿：`mod linux` 整个模块带 `#[cfg(target_os = "linux")]`，
+  macOS 上连编译都不编译；`cargo fmt`/`clippy`/`test` 同样看不到。
+  甚至 `cargo check -p sandbox --target x86_64-unknown-linux-gnu` 也走不通
+  （qlean → libssh2 的 cc-rs 需要 Linux 的 C 工具链）。
+- 应对（已固化）：
+  1. `scripts/preflight.sh::target_platform_build_check` 在跑任何验证前执行
+     `cargo check --workspace --all-targets`，非 Linux 平台会明确打印"跳过"；
+  2. 结构上减少出错面：worker（同步）只做「调 `block_on` 包住的 async 阶段函数」，
+     async 拆成 `ensure_image` / `boot_machine` / `run_on_machine` 三个独立阶段，
+     既避免跨 await 持有 `&mut machine`，也让"漏 block_on"这种错误一眼能看出；
+  3. 结论仍是同一条：**目标平台的编译是唯一可信门禁**。
+
 ## 核心经验（3 条）
 
 1. 平台 cfg 门控的代码（cfg(target_os)，feature）开发机不编译，必须推到目标平台 cargo build 验证；

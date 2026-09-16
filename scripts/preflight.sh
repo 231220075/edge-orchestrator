@@ -63,6 +63,26 @@ preflight_network() {
   return 1
 }
 
+# Build gate: the Linux-only code paths (qlean sandbox, KVM executor, Linux IPC
+# wiring) are compiled out on a macOS dev host, so `cargo check` there is green
+# even when they do not compile. This check is the only gate that sees them.
+target_platform_build_check() {
+  local root="$1"
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    echo "[preflight] not Linux: skipping the target-platform build check"
+    return 0
+  fi
+  echo "[preflight] target-platform build (this is the ONLY check that compiles the"
+  echo "            Linux-gated sandbox/executor paths; fmt+clippy on macOS cannot)"
+  if (cd "$root" && cargo check --workspace --all-targets --quiet 2>&1 | tail -30); then
+    echo "[preflight] target-platform build OK"
+    return 0
+  fi
+  echo "[preflight] FAIL: the workspace does not compile on the target platform."
+  echo "            Fix this before running anything: every later result would be stale."
+  return 1
+}
+
 # Abort helper: keep the message in one place.
 preflight_abort_if_broken() {
   if [[ "${EO_PREFLIGHT_STATUS:-ok}" == "broken" ]]; then

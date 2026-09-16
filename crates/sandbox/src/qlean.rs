@@ -244,32 +244,41 @@ mod linux {
             );
 
             let deadline = job.deadline;
+            let spec = job.spec;
 
-            // Failure at any of these stages must drop the machine (a broken guest
-            // is not reusable) and answer the job.
-            let mut outcome: Result<ExecutionResult> = async {
-                ensure_image(&image_config, &mut image, deadline).await?;
+            // Drive the stages explicitly with block_on: `worker` is a sync function,
+            // and separate calls also keep `&mut machine` from being held across an
+            // await point (which the borrow checker rejects — this is the Linux-gated
+            // path, so a mistake here only shows up on the target platform).
+            //
+            // "prepare" and "execute" stay separate so a preparation failure keeps its
+            // own error instead of being disguised as a job result.
+            let prepared: Result<()> = (|| {
+                rt.block_on(ensure_image(&image_config, &mut image, deadline))?;
 
-                // A machine is needed when: the previous one is gone (fresh mode),
-                // or the cached one died. Booting is bounded by the task budget so a
-                // stuck cloud-init cannot hang the worker forever.
                 let need_boot = match machine.as_ref() {
-                    Some(m) => !m.is_running().await.unwrap_or(false),
+                    Some(m) => !rt.block_on(async { m.is_running().await }).unwrap_or(false),
                     None => true,
                 };
                 if need_boot {
                     let img = image.as_ref().expect("image ensured above");
                     let budget = phase_budget(deadline, PhaseBudget::Boot);
-                    machine =
-                        Some(boot_machine(img, &machine_config, budget, "task machine").await?);
+                    let booted =
+                        rt.block_on(boot_machine(img, &machine_config, budget, "task machine"))?;
+                    machine = Some(booted);
                 } else {
                     tracing::info!("qlean: reusing cached VM");
                 }
+                Ok(())
+            })();
 
-                let vm = machine.as_mut().expect("machine booted above");
-                run_on_machine(vm, job.spec, deadline).await
-            }
-            .await;
+            let outcome = match prepared {
+                Ok(()) => {
+                    let vm = machine.as_mut().expect("machine booted above");
+                    rt.block_on(run_on_machine(vm, spec, deadline))
+                }
+                Err(e) => Err(e),
+            };
 
             match &outcome {
                 Ok(r) => tracing::info!(
@@ -279,8 +288,8 @@ mod linux {
                 ),
                 Err(e) => {
                     tracing::error!("qlean worker: job failed: {}", describe_err(e));
-                    // A failed/timed-out VM is not trustworthy: drop it so the
-                    // next task boots a fresh one instead of reusing a broken guest.
+                    // A failed/timed-out VM is not trustworthy: drop it so the next
+                    // task boots a fresh one instead of reusing a broken guest.
                     machine = None;
                 }
             }
@@ -301,27 +310,29 @@ mod linux {
                             }
                         }
                     }
-                    // Refill happens only when we have the image already: booting
-                    // before the first task would double the cold cost for nothing.
+                    // Refill only once the image exists: pre-booting before the first
+                    // task would double the cold cost for nothing.
                     crate::pool::PoolAction::Refill { .. } => {
-                        if image.is_none() {
+                        let Some(img) = image.as_ref() else {
                             tracing::debug!("qlean: pool refill skipped (image not prepared yet)");
                             continue;
-                        }
-                        let img = image.as_ref().expect("checked above");
-                        let budget = BOOT_TIMEOUT;
-                        match rt.block_on(boot_machine(img, &machine_config, budget, "pool refill"))
-                        {
-                            Ok(m) => {
-                                // The pool holds at most one machine here: the worker is
-                                // serial, so a second idle VM would only burn RAM.
-                                machine = Some(m);
+                        };
+                        match rt.block_on(boot_machine(
+                            img,
+                            &machine_config,
+                            BOOT_TIMEOUT,
+                            "pool refill",
+                        )) {
+                            Ok(ready) => {
+                                // The worker is serial, so one idle machine is the
+                                // useful maximum: more would only hold RAM.
+                                machine = Some(ready);
                                 tracing::info!(
                                     "qlean: pool refilled (1 idle VM ready for the next task)"
                                 );
                             }
                             Err(e) => tracing::warn!(
-                                "qlean: pool refill failed, next task will boot on demand: {}",
+                                "qlean: pool refill failed, the next task will boot on demand: {}",
                                 describe_err(&e)
                             ),
                         }

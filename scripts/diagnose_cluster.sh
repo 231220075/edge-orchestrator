@@ -31,6 +31,9 @@ source "$SCRIPT_DIR/preflight.sh"
 section "0a. preflight (mandatory: a broken host network makes every guest check lie)"
 preflight_network "$SCRIPT_DIR" || preflight_abort_if_broken
 
+section "0b. build gate (target platform)"
+target_platform_build_check "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
+
 section "0. environment"
 echo "kernel      : $(uname -sr)"
 echo "user/groups : $(id -un) / $(id -Gn)"
