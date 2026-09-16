@@ -148,6 +148,15 @@ impl ProjectClient {
             .get_blob(&snapshot.hash)
             .map(|b| b.len())
             .unwrap_or(0);
+        // The snapshot is the only source the executor has: if it is not in this
+        // node's CAS, the task can only fail after a wasted fetch round-trip.
+        if !self.store.exists(&snapshot.hash) {
+            return Err(CoreError::Internal(format!(
+                "packed snapshot {} is missing from the local CAS; refusing to dispatch a \
+                 task the executor cannot fetch",
+                snapshot.hash
+            )));
+        }
         let peer_id = self.resolve_peer(target)?;
         let task_id = uuid::Uuid::new_v4();
         let task = ProjectTask {

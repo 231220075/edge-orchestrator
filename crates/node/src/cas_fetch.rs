@@ -58,16 +58,6 @@ impl BlobFetcher {
         }
     }
 
-    /// Blob bytes from the local CAS, if present.
-    pub fn get_local(&self, hash: &Hash) -> Option<Vec<u8>> {
-        self.store.get_blob(hash).ok()
-    }
-
-    /// Store a blob locally (used before handing a task to the executor).
-    pub fn put(&self, data: &[u8]) -> Result<Hash> {
-        self.store.put_blob(data)
-    }
-
     /// Called by the swarm event loop when a `BlobResponse` arrives.
     ///
     /// Stores the blob and wakes every waiter for that hash. Returns true when
@@ -170,11 +160,6 @@ impl BlobFetcher {
             waiters.remove(hash);
         }
     }
-
-    /// Number of hashes with pending waiters (observability).
-    pub fn pending_fetches(&self) -> usize {
-        self.waiters.lock().map(|w| w.len()).unwrap_or(0)
-    }
 }
 
 #[cfg(test)]
@@ -192,7 +177,7 @@ mod tests {
     #[tokio::test]
     async fn local_hit_needs_no_network() {
         let (f, _d) = fetcher();
-        let hash = f.put(b"snapshot-bytes").unwrap();
+        let hash = f.store.put_blob(b"snapshot-bytes").unwrap();
         let got = f
             .ensure_blob(&hash, Duration::from_millis(50))
             .await
@@ -249,7 +234,10 @@ mod tests {
             b"from-peer",
             "a fetched blob must be cached in CAS"
         );
-        assert_eq!(f2.pending_fetches(), 0);
+        assert!(
+            f2.waiters.lock().unwrap().is_empty(),
+            "the waiter must be consumed"
+        );
     }
 
     #[tokio::test]
@@ -266,6 +254,9 @@ mod tests {
             .await
             .expect_err("no data can arrive here");
         assert!(format!("{err}").contains("timed out after"), "{err}");
-        assert_eq!(f.pending_fetches(), 0);
+        assert!(
+            f.waiters.lock().unwrap().is_empty(),
+            "a timed-out fetch must not leak a waiter"
+        );
     }
 }
