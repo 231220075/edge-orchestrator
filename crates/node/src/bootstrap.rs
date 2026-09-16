@@ -271,13 +271,17 @@ impl Node {
         ));
 
         // 4d. Project executor: resolved BEFORE advertising the capability, so a
-        // node that cannot really execute projects never claims it.
+        // node that cannot really execute projects never claims it. The pool size
+        // and the optional toolchain template come from the same policy block that
+        // is logged above.
         #[cfg(target_os = "linux")]
         let project_executor = make_project_executor(
             descriptor.node_id,
             Arc::clone(&cas_fetcher),
             Arc::clone(&object_store),
-            config.project_vm_mode(),
+            project_vm_mode,
+            config.project_vm_pool_size(),
+            custom_image,
         );
         #[cfg(not(target_os = "linux"))]
         let project_executor: Option<Arc<dyn p2p::ProjectExecutor>> = None;
