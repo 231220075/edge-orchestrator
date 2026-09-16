@@ -46,10 +46,20 @@ cargo test --workspace
 ./scripts/diagnose_cluster.sh
 ```
 
-Measured on a Linux + KVM host: image prep 31–33 s (first time only), VM cold
-boot 14.2–14.8 s, snapshot upload 25–49 ms, and a **warm** task (VM reused,
-toolchain present) completes in ~60 ms. A cold first task that must install gcc
-takes 48–96 s depending on mirror bandwidth.
+Measured on a Linux + KVM host (see `docs/v3-modules/26-项目完成度报告.md` for the
+full evidence table):
+
+| path | cost |
+|---|---|
+| image preparation (first time only) | 31 s |
+| VM cold boot | 15 s |
+| snapshot upload (local CAS to guest) | 24 ms |
+| warm task, toolchain already present | **31–62 ms** |
+| cold task that installs gcc (fast mirror, deb-src off) | 18 s |
+| 4 MB workspace, pulled from the submitting node's CAS | verified in stage F |
+
+`diagnose_cluster.sh` runs seven stages (env → mesh → VM → guest network → mirrors
+→ toolchain → CAS distribution → isolation) and each one prints its verdict.
 
 ## Crates
 
@@ -64,9 +74,11 @@ takes 48–96 s depending on mirror bandwidth.
 
 ## Docs
 
-- `docs/v3-modules/` — per-module records. Start with
-  `21-阶段总结与下一步分析.md` (current state) and
-  `22-wasm-lane移除记录.md` (why the Wasm lane was removed).
+- `docs/v3-modules/26-项目完成度报告.md` — **start here**: what is verified, what
+  is not, and what is next.
+- `docs/v3-modules/21-阶段总结与下一步分析.md` (how we got here),
+  `22-wasm-lane移除记录.md` (why the Wasm lane was removed),
+  `23-快照CAS分发.md`, `24-per-task隔离.md`, `25-工具链模板镜像.md`.
 - `docs/v3-architecture.md`, `plan-v2/` — earlier design records; they still
   describe the removed Wasm lane, see the note in 22.
 
