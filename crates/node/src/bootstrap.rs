@@ -25,6 +25,81 @@ impl p2p::BlobProvider for CasBlobProvider {
     }
 }
 
+/// Startup preflight for the project sandbox (Linux + KVM + qlean).
+///
+/// Reports every precondition and, when something is wrong, logs the exact
+/// command that fixes it. Rationale: the failure modes here are silent — a guest
+/// that boots without a NIC still answers every `apt-get` with exit code 0, so
+/// the pipeline looks healthy while installing nothing. Host-side facts (KVM
+/// permissions, the bridge, the bridge helper, upstream reachability) can all be
+/// checked without booting a VM, so they are checked at every startup instead of
+/// being rediscovered during a debugging session.
+#[cfg(target_os = "linux")]
+fn sandbox_preflight() {
+    use std::path::Path;
+
+    if !Path::new("/dev/kvm").exists() {
+        warn!("preflight: /dev/kvm missing — the sandbox cannot boot a VM (enable virtualization / nested KVM)");
+    } else if !is_rw("/dev/kvm") {
+        warn!(
+            "preflight: no rw access to /dev/kvm — run: sudo usermod -aG kvm $USER && \
+             re-login (current groups: {})",
+            std::env::var("USER").unwrap_or_else(|_| "?".into())
+        );
+    }
+
+    let bridge = std::env::var("EO_BRIDGE").unwrap_or_else(|_| "qlbr0".into());
+    if Path::new(&format!("/sys/class/net/{bridge}")).exists() {
+        info!("preflight: bridge {bridge} present");
+    } else {
+        warn!(
+            "preflight: bridge {bridge} missing — the guest will boot WITHOUT a NIC and every \
+             apt command will silently do nothing. Fix: sudo ./scripts/host_network_check.sh --fix"
+        );
+    }
+
+    let helper = ["/usr/lib/qemu/qemu-bridge-helper", "/usr/libexec/qemu-bridge-helper"]
+        .iter()
+        .find(|p| Path::new(p).exists());
+    match helper {
+        Some(_) => debug!("preflight: qemu-bridge-helper found"),
+        None => warn!("preflight: qemu-bridge-helper not found — install qemu-system-common"),
+    }
+    if let Ok(conf) = std::fs::read_to_string("/etc/qemu/bridge.conf") {
+        if !conf.lines().any(|l| l.trim() == format!("allow {bridge}")) {
+            warn!("preflight: /etc/qemu/bridge.conf has no 'allow {bridge}' line");
+        }
+    } else {
+        warn!("preflight: /etc/qemu/bridge.conf missing (add 'allow {bridge}')");
+    }
+
+    // Cheapest end-to-end signal: can this host fetch a Debian index at all? If
+    // not, no amount of guest-side mirror configuration can help.
+    match std::process::Command::new("curl")
+        .args([
+            "-sf",
+            "-o",
+            "/dev/null",
+            "--max-time",
+            "8",
+            "http://deb.debian.org/debian/dists/trixie/Release",
+        ])
+        .status()
+    {
+        Ok(st) if st.success() => info!("preflight: upstream Debian mirror reachable from this host"),
+        _ => warn!(
+            "preflight: cannot reach deb.debian.org from this host — project toolchain installs \
+             will fail; run ./scripts/host_network_check.sh for details"
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_rw(path: &str) -> bool {
+    use std::fs::OpenOptions;
+    OpenOptions::new().read(true).write(true).open(path).is_ok()
+}
+
 /// Build a project executor. Only Linux+KVM nodes can actually run projects,
 /// so non-Linux nodes return None (they never accept project tasks).
 #[cfg(target_os = "linux")]
@@ -98,6 +173,13 @@ impl Node {
 
         // 3. Build descriptor (raft_id comes from config)
         let mut descriptor = config.to_descriptor();
+
+        // 3. Preflight the sandbox in the configuration that claims to support it,
+        // so a broken host reports itself instead of producing silent no-op tasks.
+        if descriptor.capabilities.project_sandbox {
+            #[cfg(target_os = "linux")]
+            sandbox_preflight();
+        }
 
         // 3a. Resolve the project executor BEFORE advertising the capability:
         // a node that cannot actually execute projects must not claim it, or the

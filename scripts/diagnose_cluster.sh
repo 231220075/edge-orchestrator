@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Layered triage for "the project pipeline hangs with status=pending".
 #
+# Env overrides (single source of truth for a non-default setup):
+#   EO_MIRRORS="https://my.mirror/debian http://deb.debian.org/debian"
+#   EO_BRIDGE=qlbr0
+#
 # It replaces guesswork with staged evidence: environment -> request arrival ->
 # VM boot -> toolchain -> build/run. Each stage is timed, so the slowest (or
 # stuck) layer is obvious from the output.
@@ -94,10 +98,10 @@ submit "stage A: VM boot + upload + exec only (build_cmd = true)" "true"
 # No `timeout` binary is assumed (minimal cloud images lack it): `run_t` is a
 # watchdog subshell. NOTE: `TMO=90 run_t ...` is correct, but `TMO=90 run_t() {}`
 # is NOT valid bash — a function definition cannot follow an assignment prefix.
-GUEST_LIB='run_t() { "$@" & p=$!; ( sleep ${TMO:-60}; kill -9 $p 2>/dev/null ) & w=$!; wait $p; s=$?; kill $w 2>/dev/null; return $s; }; reap() { pkill -9 -x apt-get 2>/dev/null; pkill -9 -x http 2>/dev/null; sleep 1; rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend; }; apt_bin_update() { DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::IndexTargets::deb-src::DefaultEnabled=false update -qq; }; apt_install() { DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"; }; pick_mirror() { MIRROR=""; for m in https://mirrors.tuna.tsinghua.edu.cn/debian https://mirrors.ustc.edu.cn/debian https://mirrors.aliyun.com/debian http://deb.debian.org/debian; do if curl -sf -o /dev/null --max-time 8 "$m/dists/trixie/Release" || curl -sf -o /dev/null --max-time 8 "$m/dists/stable/Release"; then MIRROR="$m"; break; fi; done; if [ -n "$MIRROR" ]; then for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do [ -f "$f" ] || continue; sed -i.bak -E "s#https?://(deb|security|ftp)[.]debian[.]org/debian(-security)?#$MIRROR#g" "$f" && rm -f "$f.bak"; done; echo "apt mirror: $MIRROR"; else echo "apt mirror: none reachable"; fi; }'
+GUEST_LIB='run_t() { "$@" & p=$!; ( sleep ${TMO:-60}; kill -9 $p 2>/dev/null ) & w=$!; wait $p; s=$?; kill $w 2>/dev/null; return $s; }; reap() { pkill -9 -x apt-get 2>/dev/null; pkill -9 -x http 2>/dev/null; sleep 1; rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend; }; apt_bin_update() { DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::IndexTargets::deb-src::DefaultEnabled=false update -qq; }; apt_install() { DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"; }; pick_mirror() { MIRROR=""; for m in ${EO_MIRRORS:-https://mirrors.tuna.tsinghua.edu.cn/debian https://mirrors.ustc.edu.cn/debian https://mirrors.aliyun.com/debian http://deb.debian.org/debian}; do if curl -sf -o /dev/null --max-time 8 "$m/dists/trixie/Release" || curl -sf -o /dev/null --max-time 8 "$m/dists/stable/Release"; then MIRROR="$m"; break; fi; done; if [ -n "$MIRROR" ]; then for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do [ -f "$f" ] || continue; sed -i.bak -E "s#https?://(deb|security|ftp)[.]debian[.]org/debian(-security)?#$MIRROR#g" "$f" && rm -f "$f.bak"; done; echo "apt mirror: $MIRROR"; else echo "apt mirror: none reachable"; fi; }'
 
 submit "stage B: guest network probe (dns + tcp + apt, watchdogs)" \
-  "$GUEST_LIB; reap; echo '--- ip'; ip -4 addr show | grep -E 'inet |state'; echo '--- default route'; ip route | head -3; echo '--- resolv.conf'; cat /etc/resolv.conf; echo '--- ping gw'; TMO=10 run_t ping -c1 -W3 10.0.2.2 || true; echo '--- dns'; TMO=20 run_t getent hosts deb.debian.org || echo 'DNS FAILED'; echo '--- tcp 80'; TMO=20 run_t bash -c 'exec 3<>/dev/tcp/deb.debian.org/80' && echo 'TCP OK' || echo 'TCP FAILED'; echo '--- apt-get update, deb-src DISABLED, 300s cap'; TMO=300 run_t apt_bin_update && echo 'APT-BIN UPDATE OK' || echo 'APT-BIN UPDATE FAILED/TIMED OUT'; reap; echo '--- apt-get update, deb-src enabled, 300s cap'; TMO=300 run_t apt-get update -qq && echo 'APT-FULL UPDATE OK' || echo 'APT-FULL UPDATE FAILED/TIMED OUT'; reap; echo '-- probe done --'"
+  "$GUEST_LIB; reap; echo '--- ip'; ip -4 addr show | grep -E 'inet |state'; echo '--- default route'; ip route | head -3; echo '--- resolv.conf'; cat /etc/resolv.conf; echo '--- ping gw'; TMO=10 run_t ping -c1 -W3 10.0.2.2 || true; echo '--- dns'; TMO=20 run_t getent hosts deb.debian.org || echo 'DNS FAILED'; echo '--- tcp 80'; TMO=20 run_t bash -c 'exec 3<>/dev/tcp/deb.debian.org/80' && echo 'TCP OK' || echo 'TCP FAILED'; echo '--- NIC and route sanity (apt lies: it exits 0 even when NOTHING resolves)'; if ip route | grep -q '^default'; then echo 'ROUTE OK'; else echo 'ROUTE MISSING -> guest has no usable NIC: check qlbr0 on the HOST'; fi; if TMO=25 run_t curl -sf -o /dev/null http://deb.debian.org/debian/dists/trixie/Release; then echo 'HTTP REACHABLE'; echo '--- apt-get update, deb-src DISABLED, 300s cap'; TMO=300 run_t apt_bin_update && echo 'APT-BIN UPDATE OK' || echo 'APT-BIN UPDATE FAILED/TIMED OUT'; reap; else echo 'HTTP UNREACHABLE -> skipping apt verdicts (they would be meaningless)'; fi; echo '-- probe done --'"
 
 # Stage C: MIRROR SPEED, measured in the guest. The image defaults to
 # deb.debian.org; on a slow international link the ~10 MB index alone takes
@@ -112,7 +116,7 @@ submit "stage C: debian mirror speed from inside the guest" \
 
 echo
 echo "--- same measurement from the HOST (decides whether a local cache/prewarmed image is worth it) ---"
-for m in mirrors.tuna.tsinghua.edu.cn mirrors.ustc.edu.cn mirrors.aliyun.com deb.debian.org; do
+for m in $(echo "${EO_MIRRORS:-https://mirrors.tuna.tsinghua.edu.cn/debian https://mirrors.ustc.edu.cn/debian https://mirrors.aliyun.com/debian http://deb.debian.org/debian}" | tr ' ' '\n' | sed -E 's#https?://##; s#/debian$##'); do
   printf '%-32s ' "$m"
   curl -s -o /dev/null -w 'http=%{http_code} bytes=%{size_download} time=%{time_total}s speed=%{speed_download}B/s
 ' \
@@ -126,7 +130,7 @@ submit "stage D: install gcc (fast mirror, deb-src off, 600s cap) + compile + ru
 
 # Stage E: exactly what eo-agent's heuristic planner now generates.
 submit "stage E: eo-agent planner build_cmd (mirror switch + lock cleanup)" \
-  "$GUEST_LIB; (command -v gcc >/dev/null 2>&1 || (reap; pick_mirror; set -- /var/lib/apt/lists/*Packages*; if [ ! -e \"$1\" ]; then apt_bin_update || true; fi; apt_install gcc || (reap; apt_bin_update || true; apt_install gcc))) && gcc main.c -o app"
+  "$GUEST_LIB; (command -v gcc >/dev/null 2>&1 || (reap; pick_mirror; apt_install gcc || (reap; apt_bin_update || true; apt_install gcc))) && gcc main.c -o app"
 
 section "4. where did it stop?"
 for f in "$LOG_DIR"/n*.log; do
