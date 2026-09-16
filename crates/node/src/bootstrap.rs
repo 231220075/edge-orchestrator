@@ -116,8 +116,9 @@ fn make_project_executor(
     store: Arc<storage::LocalObjectStore>,
     vm_mode: sandbox::VmMode,
     pool_size: usize,
+    template: Option<sandbox::ImageTemplate>,
 ) -> Option<Arc<dyn p2p::ProjectExecutor>> {
-    match sandbox::QleanSandbox::with_policy(vm_mode, pool_size) {
+    match sandbox::QleanSandbox::with_template(vm_mode, pool_size, template) {
         Ok(sb) => Some(Arc::new(
             crate::project_executor::QleanProjectExecutor::new(Arc::new(sb), node_id, cas, store),
         )),
@@ -189,11 +190,23 @@ impl Node {
         // "why did my task behave like that" (fresh vs reuse changes isolation),
         // and it also surfaces a typo in project_vm_mode on any platform.
         let (wants_project_sandbox, project_vm_mode) = config.project_sandbox_policy();
+        // A bad template config must be reported now, not as a failed download later.
+        let custom_image = match config.project_image_template() {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("ignoring custom sandbox image config: {e}");
+                None
+            }
+        };
         info!(
             "Project sandbox policy: enabled={wants_project_sandbox}, vm_mode={project_vm_mode:?}, \
-             pool={} (reuse = warm VM shared between tasks, fresh = a new machine per task; \
-             pool pre-boots replacements to hide the boot wait)",
-            config.project_vm_pool_size()
+             pool={}, base_image={} (reuse = warm VM shared between tasks, fresh = a new \
+             machine per task; pool pre-boots replacements to hide the boot wait)",
+            config.project_vm_pool_size(),
+            match &custom_image {
+                Some(t) => t.source.as_str(),
+                None => "builtin",
+            }
         );
 
         // 3. Preflight the sandbox in the configuration that claims to support it,

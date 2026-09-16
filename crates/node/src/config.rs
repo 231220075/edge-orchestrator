@@ -90,6 +90,16 @@ pub struct CapabilitiesConfig {
     /// a build that needs one still installs it per task.
     #[serde(default = "default_project_vm_pool")]
     pub project_vm_pool_size: usize,
+
+    /// Optional custom base image ("template") for the sandbox guest, e.g. one
+    /// with the toolchain pre-installed. Requires the digest: qlean verifies the
+    /// download against it.
+    #[serde(default)]
+    pub project_image_source: Option<String>,
+
+    /// Digest of `project_image_source`, e.g. "sha256:<hex>".
+    #[serde(default)]
+    pub project_image_digest: Option<String>,
 }
 
 fn default_project_vm_mode() -> String {
@@ -111,6 +121,8 @@ impl Default for CapabilitiesConfig {
             project_sandbox: false,
             project_vm_mode: default_project_vm_mode(),
             project_vm_pool_size: default_project_vm_pool(),
+            project_image_source: None,
+            project_image_digest: None,
         }
     }
 }
@@ -173,6 +185,18 @@ impl NodeConfig {
     }
 
     /// Convert this config into a [`NodeDescriptor`] for P2P advertisement.
+    /// Parsed custom sandbox image, if configured.
+    ///
+    /// Validated here so a missing digest is reported at startup (with the exact
+    /// reason) instead of surfacing as an opaque download failure later.
+    pub fn project_image_template(&self) -> Result<Option<sandbox::ImageTemplate>, String> {
+        sandbox::ImageTemplate::from_config(
+            self.capabilities.project_image_source.as_deref(),
+            self.capabilities.project_image_digest.as_deref(),
+        )
+        .map_err(|e| format!("{e}"))
+    }
+
     /// Configured pool size for `fresh` mode, clamped to the sandbox's bound.
     pub fn project_vm_pool_size(&self) -> usize {
         self.capabilities
@@ -283,6 +307,11 @@ mod tests {
         fn default_pool() -> usize {
             default_project_vm_pool()
         }
+
+        fn default_template() -> Option<sandbox::ImageTemplate> {
+            let config: NodeConfig = serde_yaml::from_str("capabilities: {}").unwrap();
+            config.project_image_template().unwrap()
+        }
     }
 
     /// Parse a minimal YAML config; the `vm_mode` helper reads the parsed value.
@@ -302,6 +331,17 @@ mod tests {
         assert_eq!(config_with_mode("fresh").project_vm_mode(), VmMode::Fresh);
         // A typo must not silently pick a mode; it falls back to the safe default.
         assert_eq!(config_with_mode("fressh").project_vm_mode(), VmMode::Reuse);
+    }
+
+    #[test]
+    fn image_template_needs_source_and_digest() {
+        let yaml = "capabilities:\n  project_image_source: /var/lib/eo/toolchain.qcow2\n";
+        let config: NodeConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config
+            .project_image_template()
+            .expect_err("digest is mandatory");
+        assert!(err.contains("both source and digest"), "{err}");
+        assert!(NodeConfig::default_template().is_none());
     }
 
     #[test]

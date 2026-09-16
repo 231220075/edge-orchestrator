@@ -15,4 +15,4 @@ pub mod qlean;
 
 pub use eo_core::traits::ProjectSandbox;
 pub use pool::{PoolAction, PoolPlan, MAX_POOL_TARGET};
-pub use qlean::{QleanSandbox, VmMode};
+pub use qlean::{ImageTemplate, QleanSandbox, VmMode};

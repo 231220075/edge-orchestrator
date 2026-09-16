@@ -122,6 +122,14 @@ mod linux {
         tx: std_mpsc::Sender<Job>,
     }
 
+    /// Everything the worker thread needs to know before it starts.
+    #[derive(Debug, Clone)]
+    struct WorkerConfig {
+        mode: VmMode,
+        pool_size: usize,
+        template: Option<ImageTemplate>,
+    }
+
     impl QleanSandbox {
         /// The default VmMode (`Reuse`).
         pub fn new() -> Result<Self> {
@@ -130,10 +138,32 @@ mod linux {
 
         /// Create a sandbox with an explicit VM lifecycle policy and pool size.
         pub fn with_policy(mode: VmMode, pool_size: usize) -> Result<Self> {
+            Self::with_worker_config(WorkerConfig {
+                mode,
+                pool_size,
+                template: None,
+            })
+        }
+
+        /// Create a sandbox with a custom base image ("template"), e.g. one with
+        /// the toolchain pre-installed so `fresh` mode does not reinstall it.
+        pub fn with_template(
+            mode: VmMode,
+            pool_size: usize,
+            template: Option<ImageTemplate>,
+        ) -> Result<Self> {
+            Self::with_worker_config(WorkerConfig {
+                mode,
+                pool_size,
+                template,
+            })
+        }
+
+        fn with_worker_config(config: WorkerConfig) -> Result<Self> {
             let (tx, rx) = std_mpsc::channel::<Job>();
             std::thread::Builder::new()
                 .name("qlean-worker".into())
-                .spawn(move || worker(rx, mode, pool_size))
+                .spawn(move || worker(rx, config))
                 .map_err(|e| CoreError::Internal(format!("spawn qlean worker: {e}")))?;
             Ok(Self { tx })
         }
@@ -164,7 +194,7 @@ mod linux {
             }
         }
     }
-    fn worker(rx: std_mpsc::Receiver<Job>, mode: VmMode, pool_size: usize) {
+    fn worker(rx: std_mpsc::Receiver<Job>, config: WorkerConfig) {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -176,12 +206,24 @@ mod linux {
             }
         };
 
-        let image_config = qlean::ImageConfig::default();
+        let mode = config.mode;
+        let image_config = match &config.template {
+            Some(t) => {
+                tracing::info!(
+                    "qlean worker: using custom base image {} (digest {}) — a fresh machine \
+                     from this template should already carry the toolchain",
+                    t.source,
+                    t.digest
+                );
+                t.to_qlean_config()
+            }
+            None => qlean::ImageConfig::default(),
+        };
         let machine_config = qlean::MachineConfig::default();
         let mut image: Option<qlean::Image> = None;
         let mut machine: Option<qlean::Machine> = None;
 
-        let plan = crate::pool::PoolPlan::new(mode.allows_reuse(), pool_size);
+        let plan = crate::pool::PoolPlan::new(mode.allows_reuse(), config.pool_size);
         tracing::info!(
             "qlean worker: mode={mode:?}, pool_target={} ({}), reuse={}",
             plan.target,
@@ -517,6 +559,113 @@ impl ProjectSandbox for QleanSandbox {
 
 #[cfg(target_os = "linux")]
 pub use linux::QleanSandbox;
+
+/// A custom base image ("template") for the sandbox guest.
+///
+/// Motivated by the one thing VM reuse cannot give us: a *fresh* machine per task
+/// that still has the toolchain. qlean can fetch a custom image, but only when
+/// `source` and `digest` are both configured — it verifies the download against
+/// the digest — so a template without a digest is rejected here rather than
+/// failing later with an opaque error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageTemplate {
+    /// URL or local path of the qcow2 image.
+    pub source: String,
+    /// `sha256:<hex>` (or `sha512:<hex>`) of that image.
+    pub digest: String,
+}
+
+impl ImageTemplate {
+    /// Parse `source`/`digest` config values; `None` when no template is set.
+    pub fn from_config(source: Option<&str>, digest: Option<&str>) -> Result<Option<Self>> {
+        let source = source.map(str::trim).filter(|s| !s.is_empty());
+        let digest = digest.map(str::trim).filter(|s| !s.is_empty());
+        match (source, digest) {
+            (None, None) => Ok(None),
+            (Some(_), None) => Err(CoreError::Configuration(
+                "sandbox image template needs both source and digest: qlean verifies the \
+                 downloaded image against the digest, and guessing it would silently disable \
+                 that check"
+                    .into(),
+            )),
+            (None, Some(_)) => Err(CoreError::Configuration(
+                "sandbox image template digest given without a source".into(),
+            )),
+            (Some(source), Some(digest)) => {
+                let hex = digest.split_once(':').map(|(_, hex)| hex).unwrap_or(digest);
+                if !digest.contains(':')
+                    || hex.len() < 32
+                    || !hex.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    return Err(CoreError::Configuration(format!(
+                        "sandbox image digest '{digest}' must look like 'sha256:<hex>'"
+                    )));
+                }
+                Ok(Some(Self {
+                    source: source.to_string(),
+                    digest: digest.to_string(),
+                }))
+            }
+        }
+    }
+
+    /// qlean `ImageConfig` pointing at this template.
+    ///
+    /// Linux-gated: the `qlean` crate is only a dependency on the target platform.
+    #[cfg(target_os = "linux")]
+    pub fn to_qlean_config(&self) -> qlean::ImageConfig {
+        qlean::ImageConfig::default()
+            .with_source(self.source.clone())
+            .with_digest(self.digest.clone())
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::ImageTemplate;
+
+    #[test]
+    fn no_config_means_builtin_image() {
+        assert_eq!(ImageTemplate::from_config(None, None).unwrap(), None);
+        assert_eq!(
+            ImageTemplate::from_config(Some("  "), Some("")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn digest_is_mandatory() {
+        let err = ImageTemplate::from_config(Some("/var/lib/eo/toolchain.qcow2"), None)
+            .expect_err("a template without a digest must be rejected");
+        assert!(format!("{err}").contains("both source and digest"), "{err}");
+        let err = ImageTemplate::from_config(None, Some("sha256:deadbeef"))
+            .expect_err("a digest without a source is meaningless");
+        assert!(format!("{err}").contains("without a source"), "{err}");
+    }
+
+    #[test]
+    fn malformed_digest_is_rejected_before_the_fetch() {
+        for bad in ["sha256:xyz", "deadbeef", "sha256:", "sha256:1234"] {
+            assert!(
+                ImageTemplate::from_config(Some("/img.qcow2"), Some(bad)).is_err(),
+                "'{bad}' must not pass as a digest"
+            );
+        }
+    }
+
+    #[test]
+    fn a_complete_template_is_accepted() {
+        let hex = "a".repeat(64);
+        let t = ImageTemplate::from_config(
+            Some("/var/lib/eo/toolchain.qcow2"),
+            Some(&format!("sha256:{hex}")),
+        )
+        .unwrap()
+        .expect("source + digest is a valid template");
+        assert_eq!(t.source, "/var/lib/eo/toolchain.qcow2");
+        assert!(t.digest.starts_with("sha256:"));
+    }
+}
 
 #[cfg(test)]
 mod mode_tests {

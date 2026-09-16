@@ -22,6 +22,10 @@ capabilities:
   project_vm_mode: reuse
   # idle VMs to pre-boot for 'fresh' mode (0 disables)
   project_vm_pool_size: 1
+  # Optional custom base image with the toolchain pre-installed. A digest is
+  # mandatory (qlean verifies the download); see docs/v3-modules/25-工具链模板镜像.md.
+  # project_image_source: /var/lib/eo/toolchain.qcow2
+  # project_image_digest: sha256:<hex>
 
 roles:
   - "Execution"
