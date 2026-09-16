@@ -194,9 +194,8 @@ mod tests {
             .expect_err("must not invent data");
         let msg = format!("{err}");
         assert!(msg.contains("no peer is known"), "{msg}");
-        assert_eq!(
-            f.pending_fetches(),
-            0,
+        assert!(
+            f.waiters.lock().unwrap().is_empty(),
             "a failed fetch must not leak a waiter"
         );
     }
