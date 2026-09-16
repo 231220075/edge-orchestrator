@@ -45,6 +45,32 @@
      既避免跨 await 持有 `&mut machine`，也让"漏 block_on"这种错误一眼能看出；
   3. 结论仍是同一条：**目标平台的编译是唯一可信门禁**。
 
+## 第五次：连续 6 个提交把 CI 推红（2025-09，方案 A 收尾）
+
+- 事实：从 CAS 分发那轮起，**每一次 push 的 CI 都是 failure**，而我完全没看 CI，
+  只看本地 `fmt`/`clippy`/`test`（三者都看不到 Linux 门控代码）。失败原因逐个不同：
+
+| 提交 | CI 真实失败原因 |
+|---|---|
+| CAS 分发 | `-D warnings` 下 `cas_fetch` 的 `get_local`/`put`/`pending_fetches` 是 dead code |
+| 隔离模式 | 同上（另一组方法） |
+| VM 池 | `error[E0728]`：同步函数里写了 `async {}.await`（漏 `block_on`） |
+| 模板镜像 | `error[E0061]`：`make_project_executor` 调用点少了两个参数 |
+| block_on 修复 | 同一个 E0061（修复没覆盖到调用点）|
+| CAS 清理 | `error[E0599]`：测试里还残留 `pending_fetches()`（rustfmt 拆行导致替换漏掉）|
+
+- 应对（已落地）：
+  1. **把 CI 当作 Linux 编译门禁**：`gh run watch <id> --exit-status` 在 push 后确认；
+     ubuntu job 会 `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test`，
+     这两步覆盖了所有 `#[cfg(target_os = "linux")]` 代码；
+  2. 本地无法起 Linux 容器（docker daemon 未运行）、交叉 target 也走不通
+     （qlean → libssh2 需要 Linux C 工具链），所以 CI 是目前唯一可靠通道；
+  3. 后续凡改动 Linux 门控文件（`qlean.rs`、`cas_fetch.rs`、`bootstrap.rs` 的 Linux 段、
+     `project_executor.rs`），**必须看到 CI 绿再报告完成**。
+
+- 教训（比技术更重要）：**"本地全绿"在跨平台项目里几乎等于没验证**。
+  要把 CI 结果当作验收证据，而不是把"我这边过了"当结论。
+
 ## 核心经验（3 条）
 
 1. 平台 cfg 门控的代码（cfg(target_os)，feature）开发机不编译，必须推到目标平台 cargo build 验证；
