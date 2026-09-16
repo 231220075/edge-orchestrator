@@ -13,4 +13,4 @@
 pub mod qlean;
 
 pub use eo_core::traits::ProjectSandbox;
-pub use qlean::QleanSandbox;
+pub use qlean::{QleanSandbox, VmMode};

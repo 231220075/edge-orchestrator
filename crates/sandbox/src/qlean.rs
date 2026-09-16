@@ -1,12 +1,49 @@
 // Qlean-based Linux sandbox.
 //
-// A persistent worker thread owns one KVM VM (booted once) and reuses it
-// across project runs, avoiding per-task VM boot + cloud-init cost.
+// A persistent worker thread owns at most one KVM VM and, depending on
+// [`VmMode`], either reuses it across project runs (fast, but tasks share the
+// writable overlay) or boots a fresh machine per task (isolated, but pays the
+// ~14s boot every time). qlean already gives every machine its own qcow2 overlay
+// on top of the base image, so "fresh" mode really is a clean root disk.
+//
 // Only available on Linux hosts with KVM; other platforms get a stub.
 
 use eo_core::error::{CoreError, Result};
 use eo_core::traits::ProjectSandbox;
 use eo_core::types::{ExecutionResult, ProjectSpec};
+
+/// How the sandbox treats the VM between tasks.
+///
+/// Measured trade-off on a Linux+KVM host (see docs/v3-modules/24-per-task隔离.md):
+/// `Reuse` finishes a warm task in ~60ms but every task shares the same writable
+/// overlay — a task killed mid-`apt` left locks behind that broke the next task.
+/// `Fresh` pays ~14s of boot per task and cannot leak state between tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VmMode {
+    /// Keep one booted VM and reuse it (default: fastest, least isolated).
+    #[default]
+    Reuse,
+    /// Boot a new machine (its own overlay disk) for every task, then drop it.
+    Fresh,
+}
+
+impl VmMode {
+    /// Parse the config value; unknown values are reported rather than guessed.
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "reuse" | "warm" => Ok(VmMode::Reuse),
+            "fresh" | "per-task" | "isolated" => Ok(VmMode::Fresh),
+            other => Err(CoreError::Configuration(format!(
+                "unknown project sandbox vm_mode '{other}' (expected 'reuse' or 'fresh')"
+            ))),
+        }
+    }
+
+    /// Whether a machine may survive a task.
+    pub fn allows_reuse(self) -> bool {
+        matches!(self, VmMode::Reuse)
+    }
+}
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -86,11 +123,17 @@ mod linux {
     }
 
     impl QleanSandbox {
+        /// The default VmMode (`Reuse`).
         pub fn new() -> Result<Self> {
+            Self::with_mode(VmMode::Reuse)
+        }
+
+        /// Create a sandbox with an explicit VM lifecycle policy.
+        pub fn with_mode(mode: VmMode) -> Result<Self> {
             let (tx, rx) = std_mpsc::channel::<Job>();
             std::thread::Builder::new()
                 .name("qlean-worker".into())
-                .spawn(move || worker(rx))
+                .spawn(move || worker(rx, mode))
                 .map_err(|e| CoreError::Internal(format!("spawn qlean worker: {e}")))?;
             Ok(Self { tx })
         }
@@ -116,7 +159,7 @@ mod linux {
             }
         }
     }
-    fn worker(rx: std_mpsc::Receiver<Job>) {
+    fn worker(rx: std_mpsc::Receiver<Job>, mode: VmMode) {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -136,9 +179,10 @@ mod linux {
         while let Ok(job) = rx.recv() {
             let task_id = job.spec.snapshot_hash.clone();
             tracing::info!(
-                "qlean worker: job start (snapshot {task_id}, budget {}ms, vm_cached={})",
+                "qlean worker: job start (snapshot {task_id}, budget {}ms, vm_cached={}, mode={:?})",
                 job.spec.timeout_ms,
-                machine.is_some()
+                machine.is_some(),
+                mode
             );
             let result = rt.block_on(run_job(
                 &image_config,
@@ -150,15 +194,33 @@ mod linux {
             ));
             match &result {
                 Ok(r) => tracing::info!(
-                    "qlean worker: job done exit={} in {}ms",
+                    "qlean worker: job done exit={} in {}ms (mode={:?})",
                     r.exit_code,
-                    r.execution_time_ms
+                    r.execution_time_ms,
+                    mode
                 ),
                 Err(e) => {
                     tracing::error!("qlean worker: job failed: {}", describe_err(e));
                     // A failed/timed-out VM is not trustworthy: drop it so the
                     // next task boots a fresh one instead of reusing a broken guest.
                     machine = None;
+                }
+            }
+
+            // Per-task isolation: in `Fresh` mode the machine (and therefore its
+            // private overlay disk) dies with the task. That is what prevents one
+            // task's leftovers — a killed `apt` holding /var/lib/apt/lists/lock,
+            // or simply stale files under work_dir — from being visible to the
+            // next one. Cost: a boot per task.
+            if !mode.allows_reuse() {
+                if let Some(mut m) = machine.take() {
+                    let dropped = rt.block_on(async { m.shutdown().await });
+                    match dropped {
+                        Ok(()) => tracing::info!("qlean: machine discarded (fresh mode)"),
+                        Err(e) => {
+                            tracing::warn!("qlean: machine shutdown failed (fresh mode): {e}")
+                        }
+                    }
                 }
             }
             let _ = job.reply.send(result);
@@ -389,3 +451,26 @@ impl ProjectSandbox for QleanSandbox {
 
 #[cfg(target_os = "linux")]
 pub use linux::QleanSandbox;
+
+#[cfg(test)]
+mod mode_tests {
+    use super::VmMode;
+
+    #[test]
+    fn parses_both_modes_and_rejects_typos() {
+        assert_eq!(VmMode::parse("reuse").unwrap(), VmMode::Reuse);
+        assert_eq!(VmMode::parse("").unwrap(), VmMode::Reuse);
+        assert_eq!(VmMode::parse("FRESH").unwrap(), VmMode::Fresh);
+        assert_eq!(VmMode::parse("per-task").unwrap(), VmMode::Fresh);
+        assert!(
+            VmMode::parse("isoltion").is_err(),
+            "typos must not be guessed"
+        );
+    }
+
+    #[test]
+    fn only_reuse_mode_keeps_the_machine() {
+        assert!(VmMode::Reuse.allows_reuse());
+        assert!(!VmMode::Fresh.allows_reuse());
+    }
+}

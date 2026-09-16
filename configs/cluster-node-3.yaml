@@ -16,6 +16,10 @@ capabilities:
   max_memory_mb: 4096
   cpu_cores: 2
   project_sandbox: true
+  # VM lifecycle per project task:
+  #   reuse = one warm VM, ~60ms warm tasks, tasks share its disk
+  #   fresh = new machine (own overlay) per task, isolated, +~14s boot each
+  project_vm_mode: reuse
 
 roles:
   - "Execution"

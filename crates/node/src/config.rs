@@ -78,6 +78,16 @@ pub struct CapabilitiesConfig {
     /// Whether this node can run project sandboxes (Linux + KVM + qlean).
     #[serde(default)]
     pub project_sandbox: bool,
+
+    /// VM lifecycle for project tasks: "reuse" keeps one warm VM (fast, tasks
+    /// share its disk) or "fresh" boots a new machine per task (isolated, ~14s
+    /// of boot each time). See docs/v3-modules/24-per-task隔离.md.
+    #[serde(default = "default_project_vm_mode")]
+    pub project_vm_mode: String,
+}
+
+fn default_project_vm_mode() -> String {
+    "reuse".into()
 }
 
 impl Default for CapabilitiesConfig {
@@ -89,6 +99,7 @@ impl Default for CapabilitiesConfig {
             max_memory_mb: default_max_memory_mb(),
             cpu_cores: default_cpu_cores(),
             project_sandbox: false,
+            project_vm_mode: default_project_vm_mode(),
         }
     }
 }
@@ -151,6 +162,28 @@ impl NodeConfig {
     }
 
     /// Convert this config into a [`NodeDescriptor`] for P2P advertisement.
+    /// Parsed `capabilities.project_sandbox` + `project_vm_mode`.
+    ///
+    /// Available on every platform so a bad value is reported wherever the config
+    /// is loaded (the value only *takes effect* on a Linux+KVM host).
+    pub fn project_sandbox_policy(&self) -> (bool, sandbox::VmMode) {
+        (self.capabilities.project_sandbox, self.project_vm_mode())
+    }
+
+    /// VM lifecycle policy for project tasks, parsed (and validated) at load.
+    pub fn project_vm_mode(&self) -> sandbox::VmMode {
+        match sandbox::VmMode::parse(&self.capabilities.project_vm_mode) {
+            Ok(mode) => mode,
+            Err(e) => {
+                tracing::warn!(
+                    "invalid capabilities.project_vm_mode '{}': {e}; falling back to 'reuse'",
+                    self.capabilities.project_vm_mode
+                );
+                sandbox::VmMode::Reuse
+            }
+        }
+    }
+
     pub fn to_descriptor(&self) -> NodeDescriptor {
         let node_id = if self.node_id.is_empty() {
             Uuid::new_v4()
@@ -219,5 +252,30 @@ fn detect_os() -> OsType {
         OsType::Android
     } else {
         OsType::Unknown
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sandbox::VmMode;
+
+    /// Parse a minimal YAML config; the `vm_mode` helper reads the parsed value.
+    fn config_with_mode(value: &str) -> NodeConfig {
+        let yaml = format!("capabilities:\n  project_sandbox: true\n  project_vm_mode: {value}\n");
+        serde_yaml::from_str(&yaml).expect("test config must parse")
+    }
+
+    #[test]
+    fn vm_mode_defaults_to_reuse() {
+        let config: NodeConfig = serde_yaml::from_str("capabilities: {}").unwrap();
+        assert_eq!(config.project_vm_mode(), VmMode::Reuse);
+    }
+
+    #[test]
+    fn vm_mode_is_parsed_and_typos_fall_back_loudly() {
+        assert_eq!(config_with_mode("fresh").project_vm_mode(), VmMode::Fresh);
+        // A typo must not silently pick a mode; it falls back to the safe default.
+        assert_eq!(config_with_mode("fressh").project_vm_mode(), VmMode::Reuse);
     }
 }

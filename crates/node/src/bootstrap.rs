@@ -114,8 +114,9 @@ fn make_project_executor(
     node_id: NodeId,
     cas: Arc<crate::cas_fetch::BlobFetcher>,
     store: Arc<storage::LocalObjectStore>,
+    vm_mode: sandbox::VmMode,
 ) -> Option<Arc<dyn p2p::ProjectExecutor>> {
-    match sandbox::QleanSandbox::new() {
+    match sandbox::QleanSandbox::with_mode(vm_mode) {
         Ok(sb) => Some(Arc::new(
             crate::project_executor::QleanProjectExecutor::new(Arc::new(sb), node_id, cas, store),
         )),
@@ -182,6 +183,15 @@ impl Node {
 
         // 3. Build descriptor (raft_id comes from config)
         let mut descriptor = config.to_descriptor();
+
+        // Report the effective sandbox policy in the config: this is the answer to
+        // "why did my task behave like that" (fresh vs reuse changes isolation),
+        // and it also surfaces a typo in project_vm_mode on any platform.
+        let (wants_project_sandbox, project_vm_mode) = config.project_sandbox_policy();
+        info!(
+            "Project sandbox policy: enabled={wants_project_sandbox}, vm_mode={project_vm_mode:?} \
+             (reuse = warm VM shared between tasks, fresh = a new machine per task)"
+        );
 
         // 3. Preflight the sandbox in the configuration that claims to support it,
         // so a broken host reports itself instead of producing silent no-op tasks.
@@ -251,6 +261,7 @@ impl Node {
             descriptor.node_id,
             Arc::clone(&cas_fetcher),
             Arc::clone(&object_store),
+            config.project_vm_mode(),
         );
         #[cfg(not(target_os = "linux"))]
         let project_executor: Option<Arc<dyn p2p::ProjectExecutor>> = None;

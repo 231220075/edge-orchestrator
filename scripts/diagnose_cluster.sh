@@ -150,6 +150,17 @@ echo "--- snapshot path evidence (master packs it, executor pulls it) ---"
 grep -hE "snapshot .* ready locally|cas: blob .* fetched|cas: requesting blob" "$LOG_DIR"/n*.log | tail -6
 rm -rf "$BIG"
 
+# Stage G: isolation semantics. Two probes in a row; in `fresh` mode the second
+# task must NOT see the first task's leftovers (a marker file under work_dir).
+# With the default `reuse` mode the marker DOES survive — that is the trade-off,
+# printed here so it is never a surprise.
+submit "stage G: isolation probe #1 (writes a marker)" "touch /root/project/marker-from-task-1"
+submit "stage G: isolation probe #2 (reads it back)" "ls -l /root/project/marker-from-task-1 2>&1 || echo MARKER-GONE"
+echo "--- isolation verdict (see the stderr of probe #2 above) ---"
+echo "    MARKER-GONE  => per-task isolation (project_vm_mode: fresh)"
+echo "    marker file  => VM reused, tasks share the overlay (project_vm_mode: reuse)"
+grep -hE "machine discarded \(fresh mode\)|mode=(Reuse|Fresh)" "$LOG_DIR"/n*.log | tail -3
+
 section "4. where did it stop?"
 for f in "$LOG_DIR"/n*.log; do
   echo "--- $f ---"
