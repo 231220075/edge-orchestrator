@@ -84,10 +84,20 @@ pub struct CapabilitiesConfig {
     /// of boot each time). See docs/v3-modules/24-per-task隔离.md.
     #[serde(default = "default_project_vm_mode")]
     pub project_vm_mode: String,
+
+    /// How many idle VMs to pre-boot for `fresh` mode (0 disables pooling).
+    /// Pooling only removes the *boot* wait: a fresh machine has no toolchain, so
+    /// a build that needs one still installs it per task.
+    #[serde(default = "default_project_vm_pool")]
+    pub project_vm_pool_size: usize,
 }
 
 fn default_project_vm_mode() -> String {
     "reuse".into()
+}
+
+fn default_project_vm_pool() -> usize {
+    1
 }
 
 impl Default for CapabilitiesConfig {
@@ -100,6 +110,7 @@ impl Default for CapabilitiesConfig {
             cpu_cores: default_cpu_cores(),
             project_sandbox: false,
             project_vm_mode: default_project_vm_mode(),
+            project_vm_pool_size: default_project_vm_pool(),
         }
     }
 }
@@ -162,6 +173,13 @@ impl NodeConfig {
     }
 
     /// Convert this config into a [`NodeDescriptor`] for P2P advertisement.
+    /// Configured pool size for `fresh` mode, clamped to the sandbox's bound.
+    pub fn project_vm_pool_size(&self) -> usize {
+        self.capabilities
+            .project_vm_pool_size
+            .min(sandbox::MAX_POOL_TARGET)
+    }
+
     /// Parsed `capabilities.project_sandbox` + `project_vm_mode`.
     ///
     /// Available on every platform so a bad value is reported wherever the config
@@ -260,6 +278,13 @@ mod tests {
     use super::*;
     use sandbox::VmMode;
 
+    /// The shipped default pool size (kept next to the test that asserts it).
+    impl NodeConfig {
+        fn default_pool() -> usize {
+            default_project_vm_pool()
+        }
+    }
+
     /// Parse a minimal YAML config; the `vm_mode` helper reads the parsed value.
     fn config_with_mode(value: &str) -> NodeConfig {
         let yaml = format!("capabilities:\n  project_sandbox: true\n  project_vm_mode: {value}\n");
@@ -277,5 +302,20 @@ mod tests {
         assert_eq!(config_with_mode("fresh").project_vm_mode(), VmMode::Fresh);
         // A typo must not silently pick a mode; it falls back to the safe default.
         assert_eq!(config_with_mode("fressh").project_vm_mode(), VmMode::Reuse);
+    }
+
+    #[test]
+    fn pool_size_defaults_and_is_clamped() {
+        assert_eq!(NodeConfig::default_pool(), 1);
+        let yaml = format!(
+            "capabilities:\n  project_vm_pool_size: {}\n",
+            sandbox::MAX_POOL_TARGET + 50
+        );
+        let config: NodeConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            config.project_vm_pool_size(),
+            sandbox::MAX_POOL_TARGET,
+            "a too-large pool must be clamped, not honoured"
+        );
     }
 }

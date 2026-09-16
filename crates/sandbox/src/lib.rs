@@ -10,7 +10,9 @@
 //! registry, and the `ScheduledTask` fields they depended on were decorative.
 //! See `docs/v3-modules/22-wasm-lane移除记录.md`.
 
+pub mod pool;
 pub mod qlean;
 
 pub use eo_core::traits::ProjectSandbox;
+pub use pool::{PoolAction, PoolPlan, MAX_POOL_TARGET};
 pub use qlean::{QleanSandbox, VmMode};

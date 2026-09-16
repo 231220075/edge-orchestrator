@@ -128,14 +128,19 @@ mod linux {
             Self::with_mode(VmMode::Reuse)
         }
 
-        /// Create a sandbox with an explicit VM lifecycle policy.
-        pub fn with_mode(mode: VmMode) -> Result<Self> {
+        /// Create a sandbox with an explicit VM lifecycle policy and pool size.
+        pub fn with_policy(mode: VmMode, pool_size: usize) -> Result<Self> {
             let (tx, rx) = std_mpsc::channel::<Job>();
             std::thread::Builder::new()
                 .name("qlean-worker".into())
-                .spawn(move || worker(rx, mode))
+                .spawn(move || worker(rx, mode, pool_size))
                 .map_err(|e| CoreError::Internal(format!("spawn qlean worker: {e}")))?;
             Ok(Self { tx })
+        }
+
+        /// Create a sandbox with an explicit VM lifecycle policy (no pooling).
+        pub fn with_mode(mode: VmMode) -> Result<Self> {
+            Self::with_policy(mode, 0)
         }
     }
 
@@ -159,7 +164,7 @@ mod linux {
             }
         }
     }
-    fn worker(rx: std_mpsc::Receiver<Job>, mode: VmMode) {
+    fn worker(rx: std_mpsc::Receiver<Job>, mode: VmMode, pool_size: usize) {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -176,28 +181,59 @@ mod linux {
         let mut image: Option<qlean::Image> = None;
         let mut machine: Option<qlean::Machine> = None;
 
+        let plan = crate::pool::PoolPlan::new(mode.allows_reuse(), pool_size);
+        tracing::info!(
+            "qlean worker: mode={mode:?}, pool_target={} ({}), reuse={}",
+            plan.target,
+            if plan.target == 0 {
+                "pooling disabled"
+            } else {
+                "pre-booting to hide the next task's boot"
+            },
+            plan.reuse
+        );
+
         while let Ok(job) = rx.recv() {
             let task_id = job.spec.snapshot_hash.clone();
             tracing::info!(
-                "qlean worker: job start (snapshot {task_id}, budget {}ms, vm_cached={}, mode={:?})",
+                "qlean worker: job start (snapshot {task_id}, budget {}ms, vm_cached={}, mode={mode:?})",
                 job.spec.timeout_ms,
-                machine.is_some(),
-                mode
+                machine.is_some()
             );
-            let result = rt.block_on(run_job(
-                &image_config,
-                &machine_config,
-                &mut image,
-                &mut machine,
-                job.spec,
-                job.deadline,
-            ));
-            match &result {
+
+            let deadline = job.deadline;
+
+            // Failure at any of these stages must drop the machine (a broken guest
+            // is not reusable) and answer the job.
+            let mut outcome: Result<ExecutionResult> = async {
+                ensure_image(&image_config, &mut image, deadline).await?;
+
+                // A machine is needed when: the previous one is gone (fresh mode),
+                // or the cached one died. Booting is bounded by the task budget so a
+                // stuck cloud-init cannot hang the worker forever.
+                let need_boot = match machine.as_ref() {
+                    Some(m) => !m.is_running().await.unwrap_or(false),
+                    None => true,
+                };
+                if need_boot {
+                    let img = image.as_ref().expect("image ensured above");
+                    let budget = phase_budget(deadline, PhaseBudget::Boot);
+                    machine =
+                        Some(boot_machine(img, &machine_config, budget, "task machine").await?);
+                } else {
+                    tracing::info!("qlean: reusing cached VM");
+                }
+
+                let vm = machine.as_mut().expect("machine booted above");
+                run_on_machine(vm, job.spec, deadline).await
+            }
+            .await;
+
+            match &outcome {
                 Ok(r) => tracing::info!(
-                    "qlean worker: job done exit={} in {}ms (mode={:?})",
+                    "qlean worker: job done exit={} in {}ms (mode={mode:?})",
                     r.exit_code,
-                    r.execution_time_ms,
-                    mode
+                    r.execution_time_ms
                 ),
                 Err(e) => {
                     tracing::error!("qlean worker: job failed: {}", describe_err(e));
@@ -207,23 +243,51 @@ mod linux {
                 }
             }
 
-            // Per-task isolation: in `Fresh` mode the machine (and therefore its
-            // private overlay disk) dies with the task. That is what prevents one
-            // task's leftovers — a killed `apt` holding /var/lib/apt/lists/lock,
-            // or simply stale files under work_dir — from being visible to the
-            // next one. Cost: a boot per task.
-            if !mode.allows_reuse() {
-                if let Some(mut m) = machine.take() {
-                    let dropped = rt.block_on(async { m.shutdown().await });
-                    match dropped {
-                        Ok(()) => tracing::info!("qlean: machine discarded (fresh mode)"),
-                        Err(e) => {
-                            tracing::warn!("qlean: machine shutdown failed (fresh mode): {e}")
+            // Follow the pool plan: keep (reuse) or discard + refill (fresh).
+            for action in plan.after_job() {
+                match action {
+                    crate::pool::PoolAction::Keep => {}
+                    crate::pool::PoolAction::Discard => {
+                        if let Some(mut m) = machine.take() {
+                            match rt.block_on(async { m.shutdown().await }) {
+                                Ok(()) => tracing::info!("qlean: machine discarded (fresh mode)"),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "qlean: machine shutdown failed (fresh mode): {e}"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    // Refill happens only when we have the image already: booting
+                    // before the first task would double the cold cost for nothing.
+                    crate::pool::PoolAction::Refill { .. } => {
+                        if image.is_none() {
+                            tracing::debug!("qlean: pool refill skipped (image not prepared yet)");
+                            continue;
+                        }
+                        let img = image.as_ref().expect("checked above");
+                        let budget = BOOT_TIMEOUT;
+                        match rt.block_on(boot_machine(img, &machine_config, budget, "pool refill"))
+                        {
+                            Ok(m) => {
+                                // The pool holds at most one machine here: the worker is
+                                // serial, so a second idle VM would only burn RAM.
+                                machine = Some(m);
+                                tracing::info!(
+                                    "qlean: pool refilled (1 idle VM ready for the next task)"
+                                );
+                            }
+                            Err(e) => tracing::warn!(
+                                "qlean: pool refill failed, next task will boot on demand: {}",
+                                describe_err(&e)
+                            ),
                         }
                     }
                 }
             }
-            let _ = job.reply.send(result);
+
+            let _ = job.reply.send(outcome);
         }
 
         // Best-effort shutdown when the channel closes.
@@ -232,85 +296,87 @@ mod linux {
         }
     }
 
-    async fn run_job(
+    /// Make sure `image` exists locally (downloading on first use).
+    async fn ensure_image(
         image_config: &qlean::ImageConfig,
-        machine_config: &qlean::MachineConfig,
         image: &mut Option<qlean::Image>,
-        machine: &mut Option<qlean::Machine>,
+        deadline: Instant,
+    ) -> Result<()> {
+        if image.is_some() {
+            return Ok(());
+        }
+        let budget = phase_budget(deadline, PhaseBudget::Image);
+        tracing::info!(
+            "qlean: preparing image (budget {}s; may download a cloud image on first use)",
+            budget.as_secs()
+        );
+        let img = match timeout(budget, qlean::Image::new(image_config.clone())).await {
+            Ok(Ok(img)) => img,
+            Ok(Err(e)) => return Err(CoreError::SandboxExecution(format!("image: {e}"))),
+            Err(_) => {
+                return Err(CoreError::SandboxExecution(format!(
+                    "image preparation timed out after {}s (image download/cache unavailable?)",
+                    budget.as_secs()
+                )));
+            }
+        };
+        tracing::info!("qlean: image ready");
+        *image = Some(img);
+        Ok(())
+    }
+
+    /// Boot one machine from the (already prepared) image.
+    ///
+    /// Used both for a task's own machine and for pool refills, so a pooled
+    /// machine and an on-demand one are identical by construction.
+    async fn boot_machine(
+        image: &qlean::Image,
+        machine_config: &qlean::MachineConfig,
+        budget: Duration,
+        why: &str,
+    ) -> Result<qlean::Machine> {
+        let boot_start = Instant::now();
+        tracing::info!(
+            "qlean: cold boot start (budget {}s, {why}; cloud-init can take tens of seconds)",
+            budget.as_secs()
+        );
+        let mut m = match timeout(budget, qlean::Machine::new(image, machine_config)).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(e)) => return Err(CoreError::SandboxExecution(format!("machine: {e}"))),
+            Err(_) => {
+                return Err(CoreError::SandboxExecution(format!(
+                    "machine creation timed out after {}s",
+                    budget.as_secs()
+                )));
+            }
+        };
+        match timeout(budget, m.init()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(CoreError::SandboxExecution(format!("boot: {e}"))),
+            Err(_) => {
+                return Err(CoreError::SandboxExecution(format!(
+                    "VM boot timed out after {}s (cloud-init stuck? check /dev/kvm and \
+                     qemu-bridge-helper permissions)",
+                    budget.as_secs()
+                )));
+            }
+        }
+        tracing::info!(
+            "qlean: cold boot done in {}ms ({why})",
+            boot_start.elapsed().as_millis()
+        );
+        Ok(m)
+    }
+
+    /// Execute one job on a booted machine.
+    async fn run_on_machine(
+        machine: &mut qlean::Machine,
         spec: ProjectSpec,
         deadline: Instant,
     ) -> Result<ExecutionResult> {
-        if image.is_none() {
-            let budget = phase_budget(deadline, PhaseBudget::Image);
-            tracing::info!(
-                "qlean: preparing image (budget {}s; may download a cloud image on first use)",
-                budget.as_secs()
-            );
-            let img = match timeout(budget, qlean::Image::new(image_config.clone())).await {
-                Ok(Ok(img)) => img,
-                Ok(Err(e)) => {
-                    return Err(CoreError::SandboxExecution(format!("image: {e}")));
-                }
-                Err(_) => {
-                    return Err(CoreError::SandboxExecution(format!(
-                        "image preparation timed out after {}s (image download/cache unavailable?)",
-                        budget.as_secs()
-                    )));
-                }
-            };
-            tracing::info!("qlean: image ready");
-            *image = Some(img);
-        }
-
-        let need_boot = match machine.as_ref() {
-            Some(m) => !m.is_running().await.unwrap_or(false),
-            None => true,
-        };
-        if need_boot {
-            let img = image.as_ref().expect("image set above");
-            let budget = phase_budget(deadline, PhaseBudget::Boot);
-            let boot_start = Instant::now();
-            tracing::info!(
-                "qlean: cold boot start (budget {}s; cloud-init can take tens of seconds)",
-                budget.as_secs()
-            );
-            let mut m = match timeout(budget, qlean::Machine::new(img, machine_config)).await {
-                Ok(Ok(m)) => m,
-                Ok(Err(e)) => {
-                    return Err(CoreError::SandboxExecution(format!("machine: {e}")));
-                }
-                Err(_) => {
-                    return Err(CoreError::SandboxExecution(format!(
-                        "machine creation timed out after {}s",
-                        budget.as_secs()
-                    )));
-                }
-            };
-            match timeout(budget, m.init()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    return Err(CoreError::SandboxExecution(format!("boot: {e}")));
-                }
-                Err(_) => {
-                    return Err(CoreError::SandboxExecution(format!(
-                        "VM boot timed out after {}s (cloud-init stuck? check /dev/kvm and \
-                         qemu-bridge-helper permissions)",
-                        budget.as_secs()
-                    )));
-                }
-            }
-            tracing::info!(
-                "qlean: cold boot done in {}ms",
-                boot_start.elapsed().as_millis()
-            );
-            *machine = Some(m);
-        } else {
-            tracing::info!("qlean: reusing cached VM");
-        }
-
-        let vm = machine.as_mut().expect("machine booted above");
-        execute_on_vm(vm, spec, deadline).await
+        execute_on_vm(machine, spec, deadline).await
     }
+
     async fn execute_on_vm(
         vm: &mut qlean::Machine,
         spec: ProjectSpec,

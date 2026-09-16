@@ -159,7 +159,7 @@ submit "stage G: isolation probe #2 (reads it back)" "ls -l /root/project/marker
 echo "--- isolation verdict (see the stderr of probe #2 above) ---"
 echo "    MARKER-GONE  => per-task isolation (project_vm_mode: fresh)"
 echo "    marker file  => VM reused, tasks share the overlay (project_vm_mode: reuse)"
-grep -hE "machine discarded \(fresh mode\)|mode=(Reuse|Fresh)" "$LOG_DIR"/n*.log | tail -3
+grep -hE "machine discarded \(fresh mode\)|pool refilled|mode=(Reuse|Fresh)|pool_target=" "$LOG_DIR"/n*.log | tail -5
 
 section "4. where did it stop?"
 for f in "$LOG_DIR"/n*.log; do

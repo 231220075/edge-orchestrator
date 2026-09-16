@@ -20,6 +20,8 @@ capabilities:
   #   reuse = one warm VM, ~60ms warm tasks, tasks share its disk
   #   fresh = new machine (own overlay) per task, isolated, +~14s boot each
   project_vm_mode: reuse
+  # idle VMs to pre-boot for 'fresh' mode (0 disables)
+  project_vm_pool_size: 1
 
 roles:
   - "Execution"
