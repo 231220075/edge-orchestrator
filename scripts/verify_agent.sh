@@ -26,7 +26,12 @@ dump_logs() {
 }
 trap 'dump_logs' EXIT
 
-echo "[0/5] preflight (Linux + KVM + qemu + bridge helper)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/preflight.sh
+source "$SCRIPT_DIR/preflight.sh"
+
+echo "[0/5] preflight (Linux + KVM + qemu + bridge helper + host network)"
+preflight_network "$SCRIPT_DIR" || preflight_abort_if_broken
 [[ "$(uname -s)" == "Linux" ]] || { echo "FATAL: needs Linux (qlean is KVM-only)"; exit 1; }
 [[ -e /dev/kvm ]] || echo "WARN: /dev/kvm missing - VM boot will fail"
 [[ -r /dev/kvm && -w /dev/kvm ]] || echo "WARN: no rw access to /dev/kvm - is $USER in the kvm group?"

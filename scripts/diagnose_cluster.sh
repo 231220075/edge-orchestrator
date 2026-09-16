@@ -24,6 +24,13 @@ cleanup() { pkill -f "cluster-node-" 2>/dev/null || true; }
 
 section() { echo; echo "==================== $* ===================="; }
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/preflight.sh
+source "$SCRIPT_DIR/preflight.sh"
+
+section "0a. preflight (mandatory: a broken host network makes every guest check lie)"
+preflight_network "$SCRIPT_DIR" || preflight_abort_if_broken
+
 section "0. environment"
 echo "kernel      : $(uname -sr)"
 echo "user/groups : $(id -un) / $(id -Gn)"
