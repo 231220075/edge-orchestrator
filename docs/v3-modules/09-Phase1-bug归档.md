@@ -76,3 +76,25 @@
 1. 平台 cfg 门控的代码（cfg(target_os)，feature）开发机不编译，必须推到目标平台 cargo build 验证；
 2. async 库的 API 先查签名区分 Future 与 Result；不确定就 await；
 3. 异步闭包共享可变状态优先「闭包内构造+返回」，避免 async move + 外部可变捕获。
+
+## 附：测量方法论（三次「测错」换来的规则）
+
+本项目在验证隔离时**连续三次**得到「看起来正确、实则空洞」的结论：
+
+| 次数 | 错误 | 为什么看起来是对的 |
+|---|---|---|
+| 1 | 标记写在 `work_dir` 里 | `execute_on_vm` 两种模式都 `rm -rf work_dir`，reuse 也报「已消失」 |
+| 2 | 探针变量带 `M=` 前缀（`'M=/root/...'`） | bash 试图执行名为 `M=/root/...` 的文件，标记从未写入，读回必然「消失」 |
+| 3 | fresh 对照集群用了 `--listen-address` 改端口 | bootstrap_peers 仍指向旧端口 → 集群没形成，`no remote node with project_sandbox capability` |
+
+三次都不是"程序错了"，而是**测量设计错了**。固化的规则：
+
+1. **每个结论必须有一个能失败的对照**：只有「隔离成立」不算证据，还必须证明
+   「不隔离时会失败」——本次就是 reuse 组 `MARKER-SURVIVED` 对 fresh 组 `MARKER-GONE`，
+   同一探针、同一路径、唯一变量是模式；
+2. **payload 必须能被肉眼核对**：`bash -n` 抓不到 shell 元字符泄漏（规则 2 就是这么漏过去的），
+   所以给脚本加了 `EO_DRY_RUN=1`，打印真实 project 目录与 build 命令；
+3. **读被观测系统的日志**：三次都是靠 executor 打印的 `build=[...]` 数组才定位到问题——
+   自建脚本的"成功"输出不可信，被观测方的原始记录才可信；
+4. **瞬时失败不要写进结论**：一次 `syntax error` 之后同命令复跑 4 次全部正常，
+   记为疑似瞬时问题而不是缺陷（也已用生成器复现 `bash -n` 通过）。
