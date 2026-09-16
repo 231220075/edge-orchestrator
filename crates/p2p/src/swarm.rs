@@ -76,6 +76,33 @@ pub fn new_swarm(
     blob_provider: Option<std::sync::Arc<dyn BlobProvider>>,
     project_executor: Option<std::sync::Arc<dyn ProjectExecutor>>,
 ) -> Result<SwarmHandle> {
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+    new_swarm_with_commands(
+        keypair,
+        config,
+        self_descriptor,
+        blob_provider,
+        project_executor,
+        cmd_tx,
+        cmd_rx,
+    )
+}
+
+/// [`new_swarm`] with an externally created command channel.
+///
+/// Needed when a component that the swarm itself calls back into (the project
+/// executor) has to send swarm commands: the channel must exist before both, so
+/// the caller allocates it and hands the halves to each side.
+#[allow(clippy::too_many_arguments)]
+pub fn new_swarm_with_commands(
+    keypair: identity::Keypair,
+    config: SwarmConfig,
+    self_descriptor: NodeDescriptor,
+    blob_provider: Option<std::sync::Arc<dyn BlobProvider>>,
+    project_executor: Option<std::sync::Arc<dyn ProjectExecutor>>,
+    cmd_tx: mpsc::Sender<SwarmCommand>,
+    cmd_rx: mpsc::Receiver<SwarmCommand>,
+) -> Result<SwarmHandle> {
     let local_peer_id = keypair.public().to_peer_id();
     let local_public_key = keypair.public();
 
@@ -104,7 +131,6 @@ pub fn new_swarm(
     }
 
     let (event_tx, event_rx) = mpsc::channel(256);
-    let (cmd_tx, cmd_rx) = mpsc::channel(64);
     // Finished project jobs come back through this channel: only the event loop
     // may call `Behaviour::send_response`, so the job cannot answer by itself.
     let (project_tx, project_rx) = mpsc::channel::<ProjectOutcome>(8);

@@ -5,9 +5,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use eo_core::types::{NodeDescriptor, NodeId, ProjectResult, TaskId};
+#[cfg(target_os = "linux")]
+use eo_core::types::NodeId;
+use eo_core::types::{NodeDescriptor, ProjectResult, TaskId};
 use libp2p::identity;
-use p2p::{new_swarm, Event, SwarmConfig, SwarmHandle};
+use p2p::{Event, SwarmConfig, SwarmHandle};
 use tracing::{debug, info, warn};
 
 use crate::config::NodeConfig;
@@ -108,21 +110,20 @@ fn is_rw(path: &str) -> bool {
 /// Build a project executor. Only Linux+KVM nodes can actually run projects,
 /// so non-Linux nodes return None (they never accept project tasks).
 #[cfg(target_os = "linux")]
-fn make_project_executor(node_id: NodeId) -> Option<Arc<dyn p2p::ProjectExecutor>> {
+fn make_project_executor(
+    node_id: NodeId,
+    cas: Arc<crate::cas_fetch::BlobFetcher>,
+    store: Arc<storage::LocalObjectStore>,
+) -> Option<Arc<dyn p2p::ProjectExecutor>> {
     match sandbox::QleanSandbox::new() {
         Ok(sb) => Some(Arc::new(
-            crate::project_executor::QleanProjectExecutor::new(Arc::new(sb), node_id),
+            crate::project_executor::QleanProjectExecutor::new(Arc::new(sb), node_id, cas, store),
         )),
         Err(e) => {
             warn!("qlean sandbox unavailable, projects disabled: {e}");
             None
         }
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn make_project_executor(_node_id: NodeId) -> Option<Arc<dyn p2p::ProjectExecutor>> {
-    None
 }
 
 pub struct Node {
@@ -143,6 +144,9 @@ pub struct Node {
     project_client: Arc<crate::project_client::ProjectClient>,
     /// peer_id -> descriptor, learned over the mesh (light-client topology).
     known_peers: Arc<Mutex<HashMap<libp2p::PeerId, NodeDescriptor>>>,
+    /// Pull-side CAS access (fetch a blob this node does not have).
+    #[cfg(target_os = "linux")]
+    cas: Arc<crate::cas_fetch::BlobFetcher>,
 }
 
 impl Node {
@@ -186,30 +190,17 @@ impl Node {
             sandbox_preflight();
         }
 
-        // 3a. Resolve the project executor BEFORE advertising the capability:
-        // a node that cannot actually execute projects must not claim it, or the
-        // master will route every task to it and wait forever.
-        let project_executor = make_project_executor(descriptor.node_id);
-        if project_executor.is_none() && descriptor.capabilities.project_sandbox {
-            warn!(
-                "no usable project sandbox on this node (Linux + KVM + qlean required); \
-                 downgrading advertised project_sandbox=false so the master does not route \
-                 project tasks here"
-            );
-            descriptor.capabilities.project_sandbox = false;
-        }
-        info!(
-            "Node descriptor: node_id={}, raft_id={:?}, capabilities={:?}",
-            descriptor.node_id, descriptor.raft_id, descriptor.capabilities
-        );
-
-        // 3b. Initialize CAS object store (needed by the swarm blob protocol)
+        // 3b. Initialize CAS object store. Needed before the executor: the
+        // snapshot arrives over the blob protocol and lands here.
         let store_root = store_dir.to_path_buf();
         let object_store = Arc::new(
             storage::LocalObjectStore::new(store_root.clone())
                 .context("Failed to initialize CAS object store")?,
         );
         info!("CAS object store initialized at {}", store_root.display());
+
+        // (The project executor is resolved after the swarm: it needs the CAS
+        // fetcher so it can pull a snapshot it does not have locally.)
 
         // 4. Build and start P2P swarm
         let listen_addresses: Vec<libp2p::Multiaddr> = config
@@ -232,12 +223,58 @@ impl Node {
         let blob_provider = Arc::new(CasBlobProvider {
             store: Arc::clone(&object_store),
         });
-        let swarm = new_swarm(
+
+        // The swarm command channel is created here, before the swarm itself:
+        // the project executor (which the swarm calls) needs it to fetch
+        // snapshots from the CAS, so one half goes to the executor's fetcher and
+        // the other to the swarm event loop.
+        let (swarm_cmd_tx, swarm_cmd_rx) = tokio::sync::mpsc::channel::<p2p::SwarmCommand>(64);
+
+        // 4b. Raft transport and its peer registry: the registry tells the fetcher
+        // which peers to ask for a blob it does not have.
+        let (transport, incoming_tx) =
+            crate::raft::network::create_raft_transport(swarm_cmd_tx.clone());
+        let raft_registry = transport.registry().clone();
+
+        // 4c. Pull-side CAS access, shared with the project executor below.
+        #[cfg(target_os = "linux")]
+        let cas_fetcher = Arc::new(crate::cas_fetch::BlobFetcher::new(
+            Arc::clone(&object_store),
+            swarm_cmd_tx.clone(),
+            raft_registry.clone(),
+        ));
+
+        // 4d. Project executor: resolved BEFORE advertising the capability, so a
+        // node that cannot really execute projects never claims it.
+        #[cfg(target_os = "linux")]
+        let project_executor = make_project_executor(
+            descriptor.node_id,
+            Arc::clone(&cas_fetcher),
+            Arc::clone(&object_store),
+        );
+        #[cfg(not(target_os = "linux"))]
+        let project_executor: Option<Arc<dyn p2p::ProjectExecutor>> = None;
+        if project_executor.is_none() && descriptor.capabilities.project_sandbox {
+            warn!(
+                "no usable project sandbox on this node (Linux + KVM + qlean required); \
+                 downgrading advertised project_sandbox=false so the master does not route \
+                 project tasks here"
+            );
+            descriptor.capabilities.project_sandbox = false;
+        }
+        info!(
+            "Node descriptor: node_id={}, raft_id={:?}, capabilities={:?}",
+            descriptor.node_id, descriptor.raft_id, descriptor.capabilities
+        );
+
+        let swarm = p2p::new_swarm_with_commands(
             keypair,
             swarm_config,
             descriptor.clone(),
             Some(blob_provider),
             project_executor,
+            swarm_cmd_tx,
+            swarm_cmd_rx,
         )
         .context("Failed to start P2P swarm")?;
         info!("P2P swarm started successfully");
@@ -247,10 +284,6 @@ impl Node {
         // does not vote. Its proposal channel is unused (see below).
         let raft_id = config.raft_id.unwrap_or(0);
         let raft_peers = config.raft_peers.clone();
-
-        let (transport, incoming_tx) =
-            crate::raft::network::create_raft_transport(swarm.commands.clone());
-        let raft_registry = transport.registry().clone();
 
         let (proposal_tx, state_handle_opt) = if raft_id == 0 {
             let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -335,6 +368,7 @@ impl Node {
             swarm.commands.clone(),
             catalog,
             Arc::clone(&project_results),
+            Arc::clone(&object_store),
             descriptor.node_id,
         ));
 
@@ -365,6 +399,8 @@ impl Node {
             bootstrap_addrs,
             project_client,
             known_peers,
+            #[cfg(target_os = "linux")]
+            cas: cas_fetcher,
         })
     }
 
@@ -442,9 +478,18 @@ impl Node {
                     found,
                     data,
                 }) => {
-                    if found && !data.is_empty() {
-                        let _ = self.object_store.put_blob(&data);
-                        info!("Blob {} fetched from {} ({} bytes)", hash, peer_id, data.len());
+                    let len = data.len();
+                    #[cfg(target_os = "linux")]
+                    let stored = self.cas.on_blob_received(&hash, found, data);
+                    #[cfg(not(target_os = "linux"))]
+                    let stored = {
+                        let _ = data;
+                        false
+                    };
+                    if stored {
+                        info!("cas: blob {} fetched from {} ({} bytes)", hash, peer_id, len);
+                    } else if !found {
+                        warn!("cas: peer {} does not have blob {}", peer_id, hash);
                     }
                 }
                 Some(Event::ProjectResultReceived { peer_id, result }) => {

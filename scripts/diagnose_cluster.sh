@@ -80,11 +80,11 @@ if ! grep -q "Mapped raft id" "$LOG_DIR/n1.log"; then
 fi
 
 PROJ=scripts/qlean-project-demo/testproj
-submit() {  # submit <label> <build_cmd>
-  local label="$1" build="$2"
+submit() {  # submit <label> <build_cmd> [project_dir]
+  local label="$1" build="$2" proj="${3:-$PROJ}"
   section "3. $label"
   local start=$SECONDS
-  ./target/debug/examples/submit_project "$LOG_DIR/n1.sock" "$PROJ" "$build" "./app" || true
+  ./target/debug/examples/submit_project "$LOG_DIR/n1.sock" "$proj" "$build" "./app" || true
   echo "elapsed: $((SECONDS - start))s"
   echo "--- executor-side evidence ---"
   grep -hE "project task .* (accepted|finished)|qlean:" "$LOG_DIR"/n*.log | tail -12
@@ -138,6 +138,17 @@ submit "stage D: install gcc (fast mirror, deb-src off, 600s cap) + compile + ru
 # Stage E: exactly what eo-agent's heuristic planner now generates.
 submit "stage E: eo-agent planner build_cmd (mirror switch + lock cleanup)" \
   "$GUEST_LIB; (command -v gcc >/dev/null 2>&1 || (reap; pick_mirror; apt_install gcc || (reap; apt_bin_update || true; apt_install gcc))) && gcc main.c -o app"
+
+# Stage F: snapshot distribution through the CAS. The master sends only the
+# hash; the executor must pull the bytes. A ~4 MB workspace makes that visible in
+# the logs ("snapshot ... ready locally" vs a fetch through the blob protocol).
+BIG=$(mktemp -d)
+cp scripts/qlean-project-demo/testproj/main.c scripts/qlean-project-demo/testproj/Makefile "$BIG"/ 2>/dev/null || true
+head -c 4000000 /dev/urandom > "$BIG/blob.bin"
+submit "stage F: CAS snapshot distribution (~4 MB workspace)" "true" "$BIG"
+echo "--- snapshot path evidence (master packs it, executor pulls it) ---"
+grep -hE "snapshot .* ready locally|cas: blob .* fetched|cas: requesting blob" "$LOG_DIR"/n*.log | tail -6
+rm -rf "$BIG"
 
 section "4. where did it stop?"
 for f in "$LOG_DIR"/n*.log; do

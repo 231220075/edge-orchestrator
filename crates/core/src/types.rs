@@ -187,11 +187,30 @@ pub struct ProjectSpec {
 /// A packed project snapshot: the tar bytes plus their CAS hash.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectSnapshot {
-    /// CAS hash of the tar bytes.
+    /// CAS hash of the packed tar. This is the only field the master sends: the
+    /// executor fetches the bytes over the blob protocol if it lacks them
+    /// locally, which removes the inline-payload size ceiling.
     pub hash: Hash,
-    /// The tar bytes themselves. Phase 2 minimum viable path carries them
-    /// inline; larger projects should push to CAS first and send only hash.
+    /// Legacy inline payload. Retained so the wire format stays readable by an
+    /// older peer AND so the executor can skip a fetch when the sender still
+    /// chose to inline it. New code leaves this empty.
+    #[serde(default)]
     pub tar_bytes: Vec<u8>,
+}
+
+impl ProjectSnapshot {
+    /// A snapshot identified by hash only.
+    pub fn from_hash(hash: Hash) -> Self {
+        Self {
+            hash,
+            tar_bytes: Vec::new(),
+        }
+    }
+
+    /// Size of the inline payload (0 when the snapshot is hash-only).
+    pub fn inline_len(&self) -> usize {
+        self.tar_bytes.len()
+    }
 }
 
 /// A cross-node project execution request sent from master to an execution

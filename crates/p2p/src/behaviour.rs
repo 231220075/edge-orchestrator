@@ -46,12 +46,15 @@ impl EdgeOrchBehaviour {
             request_response::Config::default(),
         );
 
+        // Blobs are no longer just small code/module payloads: a project snapshot
+        // travels this way and can be tens of MB, so the default 10s request
+        // timeout is far too tight.
         let blob_exchange = request_response::Behaviour::new(
             std::iter::once((
                 BlobCodec::protocol(),
                 request_response::ProtocolSupport::Full,
             )),
-            request_response::Config::default(),
+            request_response::Config::default().with_request_timeout(Duration::from_secs(900)),
         );
 
         // Project execution can take minutes (VM boot + build), far beyond the

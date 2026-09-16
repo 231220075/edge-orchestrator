@@ -5,6 +5,9 @@
 //! the event monitor until shutdown.
 
 mod bootstrap;
+/// Pull-side CAS access: only the Linux+KVM project executor consumes it.
+#[cfg(target_os = "linux")]
+mod cas_fetch;
 mod cli;
 mod config;
 mod ipc;

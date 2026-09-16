@@ -30,18 +30,40 @@ pub fn unpack_tar(bytes: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Build a ProjectSnapshot from a local directory (Phase 2 master-side path).
-#[allow(dead_code)]
-pub fn snapshot_from_dir(dir: &Path) -> Result<ProjectSnapshot> {
+/// Pack a directory and store it in the given CAS (master-side).
+///
+/// Returns the hash only: the master keeps the bytes locally and serves them to
+/// the executor over the blob protocol, so the task message stays small no matter
+/// how large the workspace is.
+pub fn snapshot_from_dir(dir: &Path, store: &storage::LocalObjectStore) -> Result<ProjectSnapshot> {
     let tar_bytes = pack_directory(dir)?;
-    let hash = storage::hash_blob(&tar_bytes);
-    Ok(ProjectSnapshot { hash, tar_bytes })
+    let hash = store.put_blob(&tar_bytes)?;
+    Ok(ProjectSnapshot::from_hash(hash))
 }
 
-/// Extract a ProjectSnapshot tar into the destination dir (executor side).
-#[allow(dead_code)]
-pub fn extract_snapshot(snapshot: &ProjectSnapshot, dest: &Path) -> Result<()> {
-    unpack_tar(&snapshot.tar_bytes, dest)
+/// Extract a snapshot into the destination dir (executor side, Linux only).
+///
+/// The bytes come from whichever source the executor has: the inline payload when
+/// the sender inlined it, otherwise its local CAS (after a fetch). An empty
+/// payload with no CAS entry is a hard error rather than an empty workspace — the
+/// earlier "build in an empty directory" failure mode was expensive to diagnose.
+#[cfg(target_os = "linux")]
+pub fn extract_snapshot(
+    snapshot: &ProjectSnapshot,
+    store: &storage::LocalObjectStore,
+    dest: &Path,
+) -> Result<()> {
+    let bytes = if !snapshot.tar_bytes.is_empty() {
+        snapshot.tar_bytes.clone()
+    } else {
+        store.get_blob(&snapshot.hash).map_err(|e| {
+            CoreError::Internal(format!(
+                "snapshot {} is neither inline nor in the local CAS: {e}",
+                snapshot.hash
+            ))
+        })?
+    };
+    unpack_tar(&bytes, dest)
 }
 
 #[cfg(test)]
@@ -68,14 +90,27 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_hash_is_deterministic() {
+    fn snapshot_hash_is_deterministic_and_lands_in_cas() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("p");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("a.txt"), b"a").unwrap();
+        let store =
+            storage::LocalObjectStore::new(dir.path().to_path_buf()).expect("temp CAS is usable");
 
-        let s1 = snapshot_from_dir(&src).unwrap();
-        let s2 = snapshot_from_dir(&src).unwrap();
+        let s1 = snapshot_from_dir(&src, &store).unwrap();
+        let s2 = snapshot_from_dir(&src, &store).unwrap();
         assert_eq!(s1.hash, s2.hash);
+        // The master must be able to serve the bytes it advertises.
+        assert!(!s1.tar_bytes.is_empty() || store.exists(&s1.hash));
+        assert_eq!(
+            s1.inline_len(),
+            0,
+            "snapshots are hash-only on the wire; the bytes live in the CAS"
+        );
+        assert!(
+            store.exists(&s1.hash),
+            "hash-only means the CAS must hold it"
+        );
     }
 }

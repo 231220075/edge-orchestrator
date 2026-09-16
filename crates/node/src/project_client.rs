@@ -48,6 +48,8 @@ pub struct ProjectClient {
     swarm_commands: mpsc::Sender<p2p::SwarmCommand>,
     catalog: Catalog,
     results: Arc<Mutex<HashMap<TaskId, ProjectResult>>>,
+    /// Local CAS: the snapshot is stored here and served to the executor.
+    store: Arc<storage::LocalObjectStore>,
     /// task_id -> (state, dispatched_at). Lets `fetch_project_result` report
     /// something more useful than a bare `pending`.
     tasks: Arc<Mutex<HashMap<TaskId, (TaskState, Instant)>>>,
@@ -59,12 +61,14 @@ impl ProjectClient {
         swarm_commands: mpsc::Sender<p2p::SwarmCommand>,
         catalog: Catalog,
         results: Arc<Mutex<HashMap<TaskId, ProjectResult>>>,
+        store: Arc<storage::LocalObjectStore>,
         self_node_id: NodeId,
     ) -> Self {
         Self {
             swarm_commands,
             catalog,
             results,
+            store,
             tasks: Arc::new(Mutex::new(HashMap::new())),
             self_node_id,
         }
@@ -135,8 +139,15 @@ impl ProjectClient {
         timeout_ms: u64,
         target: Option<NodeId>,
     ) -> Result<TaskId> {
-        let snapshot = snapshot_from_dir(Path::new(local_dir))?;
-        let task_size = snapshot.tar_bytes.len();
+        // Pack into the LOCAL CAS and send only the hash: the executor pulls the
+        // bytes when it needs them, so the task message no longer carries the
+        // workspace (and no longer has to fit the protocol's inline ceiling).
+        let snapshot = snapshot_from_dir(Path::new(local_dir), &self.store)?;
+        let task_size = self
+            .store
+            .get_blob(&snapshot.hash)
+            .map(|b| b.len())
+            .unwrap_or(0);
         let peer_id = self.resolve_peer(target)?;
         let task_id = uuid::Uuid::new_v4();
         let task = ProjectTask {
@@ -254,7 +265,18 @@ mod tests {
             .to_peer_id()
     }
 
-    fn client(state: ClusterState, registry: RaftIdRegistry, self_id: NodeId) -> ProjectClient {
+    fn test_store() -> (Arc<storage::LocalObjectStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(storage::LocalObjectStore::new(dir.path().to_path_buf()).unwrap());
+        (store, dir)
+    }
+
+    fn client(
+        state: ClusterState,
+        registry: RaftIdRegistry,
+        self_id: NodeId,
+        store: Arc<storage::LocalObjectStore>,
+    ) -> ProjectClient {
         let (tx, _rx) = mpsc::channel(4);
         ProjectClient::new(
             tx,
@@ -263,6 +285,7 @@ mod tests {
                 registry,
             },
             Arc::new(Mutex::new(HashMap::new())),
+            store,
             self_id,
         )
     }
@@ -275,7 +298,8 @@ mod tests {
         let registry = RaftIdRegistry::new();
         let pid = peer();
         registry.insert(1, pid);
-        let c = client(state, registry, uuid::Uuid::new_v4());
+        let (store, _store_dir) = test_store();
+        let c = client(state, registry, uuid::Uuid::new_v4(), store);
         assert_eq!(c.resolve_peer(None).unwrap(), pid);
     }
 
@@ -284,7 +308,8 @@ mod tests {
         let node_id = uuid::Uuid::new_v4();
         let mut state = ClusterState::default();
         state.nodes.insert(node_id, make_node(node_id, 1, false));
-        let c = client(state, RaftIdRegistry::new(), uuid::Uuid::new_v4());
+        let (store, _store_dir) = test_store();
+        let c = client(state, RaftIdRegistry::new(), uuid::Uuid::new_v4(), store);
         assert!(c.resolve_peer(None).is_err());
     }
 
@@ -306,6 +331,7 @@ mod tests {
                 registry,
             },
             Arc::new(Mutex::new(HashMap::new())),
+            test_store().0,
             uuid::Uuid::new_v4(),
         );
         let task_id = c
@@ -323,7 +349,13 @@ mod tests {
             p2p::SwarmCommand::SendProjectTask { peer_id, task } => {
                 assert_eq!(peer_id, pid);
                 assert_eq!(task.task_id, task_id);
-                assert!(!task.snapshot.tar_bytes.is_empty());
+                // The wire message carries only the hash: the workspace itself
+                // travels through the CAS, so the task no longer has a size limit.
+                assert!(
+                    task.snapshot.tar_bytes.is_empty(),
+                    "snapshot must be hash-only on the wire"
+                );
+                assert!(!task.snapshot.hash.is_empty());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -340,7 +372,8 @@ mod tests {
         let pid_small = peer();
         registry.insert(2, pid_small);
         registry.insert(9, peer());
-        let c = client(state, registry, uuid::Uuid::new_v4());
+        let (store, _store_dir) = test_store();
+        let c = client(state, registry, uuid::Uuid::new_v4(), store);
         assert_eq!(c.resolve_peer(None).unwrap(), pid_small);
     }
     #[test]
@@ -354,6 +387,7 @@ mod tests {
             tx,
             Catalog::Peers(Arc::new(Mutex::new(peers))),
             Arc::new(Mutex::new(HashMap::new())),
+            test_store().0,
             uuid::Uuid::new_v4(),
         );
         assert_eq!(c.resolve_peer(None).unwrap(), pid);

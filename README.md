@@ -8,8 +8,10 @@ Three highlights:
 2. Verifiable project execution — a project workspace (sources + build/run
    commands) is packed, routed to a capable node and executed inside a KVM
    virtual machine (qlean), with results and timings returned to the caller.
-3. Content-addressed storage — Git-model CAS (`blob`/`tree`/`commit`) with CAS
-   hashes used for code/result addressing.
+3. Content-addressed storage — Git-model CAS (`blob`/`tree`/`commit`). The
+   workspace itself travels through it: the task message carries only a hash and
+   the executor pulls the bytes on demand, so project size is not a protocol
+   limit anymore (`docs/v3-modules/23-快照CAS分发.md`).
 
 ## Architecture
 
@@ -17,7 +19,8 @@ Three highlights:
   The replicated log currently carries node registration and role changes;
   task scheduling through the log is the next milestone
   (`runtime_loop::spawn_runtime` is explicit scaffolding for it).
-- Data plane: Git-model CAS store, plus a blob-exchange protocol over libp2p.
+- Data plane: Git-model CAS store + blob-exchange protocol over libp2p
+  (pull-only: a node asks a peer for a missing blob and caches it).
 - Execution: `ProjectSandbox` trait; qlean (QEMU/KVM) is the only backend.
   A node advertises `project_sandbox: true` only if it can really run one.
 - Client: `eo-agent` (scan workspace -> plan build/run -> submit -> analyse).
