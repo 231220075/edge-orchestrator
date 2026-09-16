@@ -24,15 +24,36 @@ cleanup() { pkill -f "cluster-node-" 2>/dev/null || true; }
 
 section() { echo; echo "==================== $* ===================="; }
 
+# Which stages to run: EO_STAGES="A C G" (default: all). Useful when iterating on
+# one thing instead of paying for the whole suite every time.
+EO_STAGES="${EO_STAGES:-all}"
+stage_on() {
+  [[ "$EO_STAGES" == "all" ]] && return 0
+  local want
+  for want in $EO_STAGES; do [[ "$want" == "$1" ]] && return 0; done
+  return 1
+}
+skipped() { echo; echo "--- stage $1 skipped (EO_STAGES=$EO_STAGES) ---"; }
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=scripts/preflight.sh
 source "$SCRIPT_DIR/preflight.sh"
 
-section "0a. preflight (mandatory: a broken host network makes every guest check lie)"
-preflight_network "$SCRIPT_DIR" || preflight_abort_if_broken
+if [[ "${EO_DRY_RUN:-0}" == "1" ]]; then
+  echo "[dry-run] skipping host preflight and build gate; printing payloads only"
+else
+  section "0a. preflight (mandatory: a broken host network makes every guest check lie)"
+  preflight_network "$SCRIPT_DIR" || preflight_abort_if_broken
+fi
 
-section "0b. build gate (target platform)"
-target_platform_build_check "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
+if [[ "${EO_DRY_RUN:-0}" != "1" ]]; then
+  section "0b. build gate (target platform)"
+  target_platform_build_check "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
+fi
+
+if [[ "${EO_DRY_RUN:-0}" == "1" ]]; then
+  echo "[dry-run] payloads below; no processes started"
+fi
 
 section "0. environment"
 echo "kernel      : $(uname -sr)"
@@ -57,6 +78,12 @@ echo "stale qemu  : $(pgrep -c qemu-system 2>/dev/null || echo 0)"
 if [[ -n "$(pgrep -af 'target/debug/node' || true)" ]]; then
   echo "WARNING: old node processes are alive; killing them (they hold /dev/kvm and the mesh ports)"
   cleanup; sleep 1
+fi
+
+if [[ "${EO_DRY_RUN:-0}" == "1" ]]; then
+  echo
+  echo "[dry-run] payloads printed above; not starting any node"
+  exit 0
 fi
 
 section "1. build"
@@ -85,6 +112,10 @@ fi
 PROJ=scripts/qlean-project-demo/testproj
 submit() {  # submit <label> <build_cmd> [project_dir]
   local label="$1" build="$2" proj="${3:-$PROJ}"
+  if [[ "${EO_DRY_RUN:-0}" == "1" ]]; then
+    printf '[dry-run] %s\n  project=%s\n  build=%s\n' "$label" "$proj" "$build"
+    return 0
+  fi
   section "3. $label"
   local start=$SECONDS
   ./target/debug/examples/submit_project "$LOG_DIR/n1.sock" "$proj" "$build" "./app" || true
@@ -95,103 +126,152 @@ submit() {  # submit <label> <build_cmd> [project_dir]
   grep -hE "dispatched to peer|result received" "$LOG_DIR"/n*.log | tail -4
 }
 
-# Stage A: no toolchain work at all -> isolates "VM boot + upload + exec".
-# Expected: exit=1 with "./app: No such file or directory" on stderr, because
-# build_cmd=true never produces an app. (Before, a signal-killed command was
-# reported as exit 0.)
-submit "stage A: VM boot + upload + exec only (build_cmd = true)" "true"
-
-# Stage B: is the guest able to reach the outside world at all? A failing/hanging
-# apt-get is the most common reason this pipeline looks stuck, and `-qq` hides
-# its output, so probe explicitly.
-#
-# No `timeout` binary is assumed (minimal cloud images lack it): `run_t` is a
-# watchdog subshell. NOTE: `TMO=90 run_t ...` is correct, but `TMO=90 run_t() {}`
-# is NOT valid bash — a function definition cannot follow an assignment prefix.
-GUEST_LIB='run_t() { "$@" & p=$!; ( sleep ${TMO:-60}; kill -9 $p 2>/dev/null ) & w=$!; wait $p; s=$?; kill $w 2>/dev/null; return $s; }; reap() { pkill -9 -x apt-get 2>/dev/null; pkill -9 -x http 2>/dev/null; sleep 1; rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend; }; apt_bin_update() { DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::IndexTargets::deb-src::DefaultEnabled=false update -qq; }; apt_install() { DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"; }; pick_mirror() { MIRROR=""; for m in ${EO_MIRRORS:-https://mirrors.tuna.tsinghua.edu.cn/debian https://mirrors.ustc.edu.cn/debian https://mirrors.aliyun.com/debian http://deb.debian.org/debian}; do if curl -sf -o /dev/null --max-time 8 "$m/dists/trixie/Release" || curl -sf -o /dev/null --max-time 8 "$m/dists/stable/Release"; then MIRROR="$m"; break; fi; done; if [ -n "$MIRROR" ]; then for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do [ -f "$f" ] || continue; sed -i.bak -E "s#https?://(deb|security|ftp)[.]debian[.]org/debian(-security)?#$MIRROR#g" "$f" && rm -f "$f.bak"; done; echo "apt mirror: $MIRROR"; else echo "apt mirror: none reachable"; fi; }'
-
-submit "stage B: guest network probe (dns + tcp + apt, watchdogs)" \
-  "$GUEST_LIB; reap; echo '--- ip'; ip -4 addr show | grep -E 'inet |state'; echo '--- default route'; ip route | head -3; echo '--- resolv.conf'; cat /etc/resolv.conf; echo '--- ping gw'; TMO=10 run_t ping -c1 -W3 10.0.2.2 || true; echo '--- dns'; TMO=20 run_t getent hosts deb.debian.org || echo 'DNS FAILED'; echo '--- tcp 80'; TMO=20 run_t bash -c 'exec 3<>/dev/tcp/deb.debian.org/80' && echo 'TCP OK' || echo 'TCP FAILED'; echo '--- NIC and route sanity (apt lies: it exits 0 even when NOTHING resolves)'; if ip route | grep -q '^default'; then echo 'ROUTE OK'; else echo 'ROUTE MISSING -> guest has no usable NIC: check qlbr0 on the HOST'; fi; if TMO=25 run_t curl -sf -o /dev/null http://deb.debian.org/debian/dists/trixie/Release; then echo 'HTTP REACHABLE'; echo '--- apt-get update, deb-src DISABLED, 300s cap'; TMO=300 run_t apt_bin_update && echo 'APT-BIN UPDATE OK' || echo 'APT-BIN UPDATE FAILED/TIMED OUT'; reap; else echo 'HTTP UNREACHABLE -> skipping apt verdicts (they would be meaningless)'; fi; echo '-- probe done --'"
-
-# Stage C: MIRROR SPEED, measured in the guest. The image defaults to
-# deb.debian.org; on a slow international link the ~10 MB index alone takes
-# minutes, which is the real reason this pipeline looks stuck.
-submit "stage C: debian mirror speed from inside the guest" \
-  "$GUEST_LIB; for m in mirrors.tuna.tsinghua.edu.cn mirrors.ustc.edu.cn mirrors.aliyun.com mirrors.cloud.tencent.com deb.debian.org; do \
-     u=\"http://\$m/debian/dists/trixie/main/binary-amd64/Packages.xz\"; \
-     line=\$(curl -s -o /dev/null -w 'http=%{http_code} bytes=%{size_download} time=%{time_total}s speed=%{speed_download}B/s' --max-time 30 \"\$u\"); \
-     echo \"\$m \$line\"; \
-   done; \
-   echo '--- sources format on this image'; ls /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; head -6 /etc/apt/sources.list.d/*.sources 2>/dev/null || head -6 /etc/apt/sources.list 2>/dev/null"
-
-echo
-echo "--- same measurement from the HOST (decides whether a local cache/prewarmed image is worth it) ---"
-for m in $(echo "${EO_MIRRORS:-https://mirrors.tuna.tsinghua.edu.cn/debian https://mirrors.ustc.edu.cn/debian https://mirrors.aliyun.com/debian http://deb.debian.org/debian}" | tr ' ' '\n' | sed -E 's#https?://##; s#/debian$##'); do
-  printf '%-32s ' "$m"
-  curl -s -o /dev/null -w 'http=%{http_code} bytes=%{size_download} time=%{time_total}s speed=%{speed_download}B/s
-' \
-    --max-time 30 "http://$m/debian/dists/trixie/main/binary-amd64/Packages.xz" || echo "unreachable"
-done
-
-# Stage D: the real plan. No deb-src indexes, apt output visible, bounded so a
-# broken guest fails fast instead of burning the whole task budget.
-BUILD="(command -v gcc >/dev/null 2>&1 || (reap; pick_mirror; TMO=600 run_t apt_install gcc)) && gcc main.c -o app"
-submit "stage D: install gcc (fast mirror, deb-src off, 600s cap) + compile + run" "$GUEST_LIB; $BUILD"
-
-# Stage E: exactly what eo-agent's heuristic planner now generates.
-submit "stage E: eo-agent planner build_cmd (mirror switch + lock cleanup)" \
-  "$GUEST_LIB; (command -v gcc >/dev/null 2>&1 || (reap; pick_mirror; apt_install gcc || (reap; apt_bin_update || true; apt_install gcc))) && gcc main.c -o app"
-
-# Stage F: snapshot distribution through the CAS. The master sends only the
-# hash; the executor must pull the bytes. A ~4 MB workspace makes that visible in
-# the logs ("snapshot ... ready locally" vs a fetch through the blob protocol).
-BIG=$(mktemp -d)
-cp scripts/qlean-project-demo/testproj/main.c scripts/qlean-project-demo/testproj/Makefile "$BIG"/ 2>/dev/null || true
-head -c 4000000 /dev/urandom > "$BIG/blob.bin"
-submit "stage F: CAS snapshot distribution (~4 MB workspace)" "true" "$BIG"
-echo "--- snapshot path evidence (master packs it, executor pulls it) ---"
-grep -hE "snapshot .* ready locally|cas: blob .* fetched|cas: requesting blob" "$LOG_DIR"/n*.log | tail -6
-rm -rf "$BIG"
-
-# Stage G: what does "isolation" actually mean here?
-#
-# The marker must live OUTSIDE work_dir: `execute_on_vm` runs `rm -rf <work_dir>`
-# before every task in BOTH modes, so a marker inside it disappears regardless and
-# would "pass" for the wrong reason (that mistake was made once already).
-#
-# So the probe writes /root/marker-* , which only a layer below the project dir can
-# erase — i.e. a different machine (fresh) vs the same one (reuse).
-ISOLATION_PROBE='M=/root/eo-isolation-marker'
-submit "stage G1: reuse-mode worker writes a marker outside work_dir" \
-  "echo reused > $ISOLATION_PROBE; echo wrote-$ISOLATION_PROBE"
-submit "stage G2: same worker reads it back" \
-  "test -f $ISOLATION_PROBE && echo MARKER-SURVIVED-reuse-is-not-isolated || echo MARKER-GONE-isolated"
-
-# Counter-example on dedicated nodes: fresh mode, no pool (so the machine cannot
-# be a leftover), leaving the user's own cluster config untouched.
-echo
-echo "--- stage G3: same probe on fresh-mode nodes (dedicated ports 391xx) ---"
-for i in 1 2 3; do
-  RUST_LOG=info ./target/debug/node \
-    --config "configs/cluster-node-$i.yaml" \
-    --listen-address /ip4/127.0.0.1/tcp/3910$i \
-    --store-dir "$LOG_DIR/fresh-n$i" \
-    --ipc-socket "$LOG_DIR/fresh-n$i.sock" \
-    --project-vm-mode fresh --project-vm-pool-size 0 \
-    > "$LOG_DIR/fresh-n$i.log" 2>&1 &
-done
-sleep 12
-if grep -q "vm_mode=Fresh" "$LOG_DIR"/fresh-n*.log 2>/dev/null; then
-  ./target/debug/examples/submit_project "$LOG_DIR/fresh-n1.sock" "$PROJ" \
-    "echo fresh > $ISOLATION_PROBE; echo wrote-$ISOLATION_PROBE" "./app" >/dev/null 2>&1 || true
-  ./target/debug/examples/submit_project "$LOG_DIR/fresh-n1.sock" "$PROJ" \
-    "test -f $ISOLATION_PROBE && echo MARKER-SURVIVED || echo MARKER-GONE-isolated" "./app" \
-    2>&1 | tail -2
-  grep -hE "machine discarded \(fresh mode\)|vm_mode=" "$LOG_DIR"/fresh-n*.log | tail -3
+if stage_on A; then
+  # Stage A: no toolchain work at all -> isolates "VM boot + upload + exec".
+  # Expected: exit=1 with "./app: No such file or directory" on stderr, because
+  # build_cmd=true never produces an app. (Before, a signal-killed command was
+  # reported as exit 0.)
+  submit "stage A: VM boot + upload + exec only (build_cmd = true)" "true"
 else
-  echo "  (fresh-mode nodes did not start with the CLI overrides below; skipping)"
+  skipped A
 fi
-pkill -f "cluster-node-.*3910" 2>/dev/null || true
+
+if stage_on B; then
+  # Stage B: is the guest able to reach the outside world at all? A failing/hanging
+  # apt-get is the most common reason this pipeline looks stuck, and `-qq` hides
+  # its output, so probe explicitly.
+  #
+  # No `timeout` binary is assumed (minimal cloud images lack it): `run_t` is a
+  # watchdog subshell. NOTE: `TMO=90 run_t ...` is correct, but `TMO=90 run_t() {}`
+  # is NOT valid bash — a function definition cannot follow an assignment prefix.
+  GUEST_LIB='run_t() { "$@" & p=$!; ( sleep ${TMO:-60}; kill -9 $p 2>/dev/null ) & w=$!; wait $p; s=$?; kill $w 2>/dev/null; return $s; }; reap() { pkill -9 -x apt-get 2>/dev/null; pkill -9 -x http 2>/dev/null; sleep 1; rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend; }; apt_bin_update() { DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::IndexTargets::deb-src::DefaultEnabled=false update -qq; }; apt_install() { DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"; }; pick_mirror() { MIRROR=""; for m in ${EO_MIRRORS:-https://mirrors.tuna.tsinghua.edu.cn/debian https://mirrors.ustc.edu.cn/debian https://mirrors.aliyun.com/debian http://deb.debian.org/debian}; do if curl -sf -o /dev/null --max-time 8 "$m/dists/trixie/Release" || curl -sf -o /dev/null --max-time 8 "$m/dists/stable/Release"; then MIRROR="$m"; break; fi; done; if [ -n "$MIRROR" ]; then for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do [ -f "$f" ] || continue; sed -i.bak -E "s#https?://(deb|security|ftp)[.]debian[.]org/debian(-security)?#$MIRROR#g" "$f" && rm -f "$f.bak"; done; echo "apt mirror: $MIRROR"; else echo "apt mirror: none reachable"; fi; }'
+
+  submit "stage B: guest network probe (dns + tcp + apt, watchdogs)" \
+    "$GUEST_LIB; reap; echo '--- ip'; ip -4 addr show | grep -E 'inet |state'; echo '--- default route'; ip route | head -3; echo '--- resolv.conf'; cat /etc/resolv.conf; echo '--- ping gw'; TMO=10 run_t ping -c1 -W3 10.0.2.2 || true; echo '--- dns'; TMO=20 run_t getent hosts deb.debian.org || echo 'DNS FAILED'; echo '--- tcp 80'; TMO=20 run_t bash -c 'exec 3<>/dev/tcp/deb.debian.org/80' && echo 'TCP OK' || echo 'TCP FAILED'; echo '--- NIC and route sanity (apt lies: it exits 0 even when NOTHING resolves)'; if ip route | grep -q '^default'; then echo 'ROUTE OK'; else echo 'ROUTE MISSING -> guest has no usable NIC: check qlbr0 on the HOST'; fi; if TMO=25 run_t curl -sf -o /dev/null http://deb.debian.org/debian/dists/trixie/Release; then echo 'HTTP REACHABLE'; echo '--- apt-get update, deb-src DISABLED, 300s cap'; TMO=300 run_t apt_bin_update && echo 'APT-BIN UPDATE OK' || echo 'APT-BIN UPDATE FAILED/TIMED OUT'; reap; else echo 'HTTP UNREACHABLE -> skipping apt verdicts (they would be meaningless)'; fi; echo '-- probe done --'"
+else
+  skipped B
+fi
+
+if stage_on C; then
+  # Stage C: MIRROR SPEED, measured in the guest. The image defaults to
+  # deb.debian.org; on a slow international link the ~10 MB index alone takes
+  # minutes, which is the real reason this pipeline looks stuck.
+  submit "stage C: debian mirror speed from inside the guest" \
+    "$GUEST_LIB; for m in mirrors.tuna.tsinghua.edu.cn mirrors.ustc.edu.cn mirrors.aliyun.com mirrors.cloud.tencent.com deb.debian.org; do \
+       u=\"http://\$m/debian/dists/trixie/main/binary-amd64/Packages.xz\"; \
+       line=\$(curl -s -o /dev/null -w 'http=%{http_code} bytes=%{size_download} time=%{time_total}s speed=%{speed_download}B/s' --max-time 30 \"\$u\"); \
+       echo \"\$m \$line\"; \
+     done; \
+     echo '--- sources format on this image'; ls /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; head -6 /etc/apt/sources.list.d/*.sources 2>/dev/null || head -6 /etc/apt/sources.list 2>/dev/null"
+
+  echo
+  echo "--- same measurement from the HOST (decides whether a local cache/prewarmed image is worth it) ---"
+  for m in $(echo "${EO_MIRRORS:-https://mirrors.tuna.tsinghua.edu.cn/debian https://mirrors.ustc.edu.cn/debian https://mirrors.aliyun.com/debian http://deb.debian.org/debian}" | tr ' ' '\n' | sed -E 's#https?://##; s#/debian$##'); do
+    printf '%-32s ' "$m"
+    curl -s -o /dev/null -w 'http=%{http_code} bytes=%{size_download} time=%{time_total}s speed=%{speed_download}B/s
+  ' \
+      --max-time 30 "http://$m/debian/dists/trixie/main/binary-amd64/Packages.xz" || echo "unreachable"
+  done
+else
+  skipped C
+fi
+
+if stage_on D; then
+  # Stage D: the real plan. No deb-src indexes, apt output visible, bounded so a
+  # broken guest fails fast instead of burning the whole task budget.
+  BUILD="(command -v gcc >/dev/null 2>&1 || (reap; pick_mirror; TMO=600 run_t apt_install gcc)) && gcc main.c -o app"
+  submit "stage D: install gcc (fast mirror, deb-src off, 600s cap) + compile + run" "$GUEST_LIB; $BUILD"
+else
+  skipped D
+fi
+
+if stage_on E; then
+  # Stage E: exactly what eo-agent's heuristic planner now generates.
+  submit "stage E: eo-agent planner build_cmd (mirror switch + lock cleanup)" \
+    "$GUEST_LIB; (command -v gcc >/dev/null 2>&1 || (reap; pick_mirror; apt_install gcc || (reap; apt_bin_update || true; apt_install gcc))) && gcc main.c -o app"
+else
+  skipped E
+fi
+
+if stage_on F; then
+  # Stage F: snapshot distribution through the CAS. The master sends only the
+  # hash; the executor must pull the bytes. A ~4 MB workspace makes that visible in
+  # the logs ("snapshot ... ready locally" vs a fetch through the blob protocol).
+  BIG=$(mktemp -d)
+  cp scripts/qlean-project-demo/testproj/main.c scripts/qlean-project-demo/testproj/Makefile "$BIG"/ 2>/dev/null || true
+  head -c 4000000 /dev/urandom > "$BIG/blob.bin"
+  submit "stage F: CAS snapshot distribution (~4 MB workspace)" "true" "$BIG"
+  echo "--- snapshot path evidence (master packs it, executor pulls it) ---"
+  grep -hE "snapshot .* ready locally|cas: blob .* fetched|cas: requesting blob" "$LOG_DIR"/n*.log | tail -6
+  rm -rf "$BIG"
+else
+  skipped F
+fi
+
+if stage_on G; then
+  # Stage G: what does "isolation" actually mean here?
+  #
+  # Two mistakes were made here before, both of which produced a confident-looking
+  # but meaningless verdict, so the probe is built defensively now:
+  #
+  #  1. the marker must live OUTSIDE work_dir (execute_on_vm wipes work_dir in BOTH
+  #     modes), and
+  #  2. it must reach the guest WITHOUT any shell metacharacter surviving the trip
+  #     through JSON -> bash -c. A previous version interpolated `VAR=path` into the
+  #     command string, so bash tried to run a file literally named `M=/root/...`
+  #     and the marker was never written.
+  #
+  # Hence: a plain path with no metacharacters, repeated inline instead of via a
+  # variable. `bash -n` on the generated string is not enough to catch the class of
+  # bug above; only reading the logged `build=[...]` does.
+  MARKER=/root/eo-isolation-marker
+  submit "stage G1: reuse-mode worker writes a marker outside work_dir" \
+    "echo reused > $MARKER && echo wrote-$MARKER"
+  submit "stage G2: same worker reads it back" \
+    "test -f $MARKER && echo MARKER-SURVIVED-reuse-is-not-isolated || echo MARKER-GONE-isolated"
+
+  # Counter-example on a dedicated fresh-mode cluster.
+  #
+  # The nodes get generated configs (ports 391xx) rather than a --listen-address
+  # override: overriding only the listen address left their bootstrap_peers pointing
+  # at 3900x, so the "cluster" never formed a mesh and had no executor to route to
+  # ("no remote node with project_sandbox capability").
+  echo
+  echo "--- stage G3: same probe on a fresh-mode cluster (generated configs, ports 391xx) ---"
+  FRESH_CFG="$LOG_DIR/fresh-configs"
+  mkdir -p "$FRESH_CFG"
+  for i in 1 2 3; do
+    sed -e "s/39001/39101/g; s/39002/39102/g; s/39003/39103/g" \
+      "configs/cluster-node-$i.yaml" > "$FRESH_CFG/node-$i.yaml"
+  done
+  for i in 1 2 3; do
+    RUST_LOG=info ./target/debug/node \
+      --config "$FRESH_CFG/node-$i.yaml" \
+      --store-dir "$LOG_DIR/fresh-n$i" \
+      --ipc-socket "$LOG_DIR/fresh-n$i.sock" \
+      --project-vm-mode fresh --project-vm-pool-size 0 \
+      > "$LOG_DIR/fresh-n$i.log" 2>&1 &
+  done
+  sleep 14
+  if grep -q "vm_mode=Fresh" "$LOG_DIR"/fresh-n1.log 2>/dev/null \
+     && grep -q "Mapped raft id" "$LOG_DIR/fresh-n1.log" 2>/dev/null; then
+    echo "  fresh cluster formed:"
+    grep -hE "Project sandbox policy|Mapped raft id" "$LOG_DIR"/fresh-n1.log | sed 's/^/    /'
+    ./target/debug/examples/submit_project "$LOG_DIR/fresh-n1.sock" "$PROJ" \
+      "echo fresh > $MARKER && echo wrote-$MARKER" "./app" >/dev/null 2>&1 || true
+    echo "  probe #2 on fresh cluster:"
+    ./target/debug/examples/submit_project "$LOG_DIR/fresh-n1.sock" "$PROJ" \
+      "test -f $MARKER && echo MARKER-SURVIVED-reuse-is-not-isolated || echo MARKER-GONE-isolated" \
+      "./app" 2>&1 | tail -1 | sed 's/^/    /'
+    grep -hE "machine discarded \(fresh mode\)" "$LOG_DIR"/fresh-n*.log | tail -2 | sed 's/^/    /'
+  else
+    echo "  fresh cluster did not come up; showing why:"
+    grep -hE "Project sandbox policy|Mapped raft id|Connection established" "$LOG_DIR"/fresh-n1.log 2>/dev/null | tail -3 | sed 's/^/    /'
+  fi
+  pkill -f "fresh-configs" 2>/dev/null || true
+else
+  skipped G
+fi
 
 section "4. where did it stop?"
 for f in "$LOG_DIR"/n*.log; do
