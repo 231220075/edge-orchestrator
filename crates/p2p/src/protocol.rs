@@ -249,7 +249,13 @@ impl request_response::Codec for RaftMessageCodec {
 
 pub const BLOB_PROTOCOL: &str = "/edge-orch/blob/1.0.0";
 const BLOB_REQUEST_MAX_SIZE: usize = 4 * 1024;
-const BLOB_RESPONSE_MAX_SIZE: usize = 64 * 1024 * 1024;
+/// Upper bound on an inbound blob response.
+///
+/// Raised from 64 MB to 512 MB when snapshots started travelling the CAS: the
+/// read is length-prefixed and validated *before* allocating, so a larger cap is
+/// only about honest capacity, not about accepting arbitrary input. Anything
+/// beyond this still needs chunked/streamed transfer (see the snapshot doc).
+const BLOB_RESPONSE_MAX_SIZE: usize = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobRequest {

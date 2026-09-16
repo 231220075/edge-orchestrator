@@ -12,6 +12,7 @@
 | 大小上限 | 协议 64MB（硬上限） | 无（受 CAS 磁盘限制） |
 | 谁持有字节 | 双方各一份（消息里） | master 的 CAS；executor 按需拉取并缓存 |
 | 失败表现 | 超限直接发不出去 | 拉取失败有明确原因（无 peer / 超时） |
+| 实际上限 | 64MB（project 协议） | **512MB**（blob 协议，见下） |
 
 `ProjectSnapshot` 现在是 hash-first：`hash` + 兼容用的 `tar_bytes`（新代码留空）。
 `sender` 打包后写入自己的 CAS，只把 hash 放进任务；`receiver` 先查本地 CAS，
@@ -61,6 +62,16 @@ cas: blob <hash> fetched from <peer> (N bytes)
 判定要点：**executor 的日志里 `ready locally` 的字节数应等于 workspace 打包大小**，
 而 `cas: blob ... fetched` 出现即证明走的是 CAS 分发而非内嵌。
 
+## 4b. 上限并没有消失，只是搬家了（重要更正）
+
+改造后我核对了一遍：`blob_exchange` 的读上限原本是
+`BLOB_RESPONSE_MAX_SIZE = 64MB`，也就是说**快照超过 64MB 依然会被截断/拒绝**，
+只是从 project 协议挪到了 blob 协议。本轮已把它提到 **512MB**
+（读是"先读长度前缀、校验后再分配"，提高上限只是容量问题，不改变安全性）。
+
+真要支持超大工程（GB 级），还需要**分块/流式传输**（按 CAS 分块并对每块校验 hash），
+这是后续工作，不是靠调大常量能解决的。
+
 ## 5. 仍然存在的边界
 
 - 快照在 master 的 CAS 里**没有回收策略**（`gc` 未接入）：反复提交会累积 tar blob；
@@ -68,4 +79,5 @@ cas: blob <hash> fetched from <peer> (N bytes)
   （简单但浪费；正确做法是记录"谁有"或改成分块/去重传输）；
 - 没有完整性校验：`BlobCodec` 只传 hash 与 bytes，接收端不校验内容是否等于 hash
   （CAS 的 `put_blob` 会按内容重新算 hash 存储，但请求的 hash 与实际内容不匹配时不会报错）；
+- 单次响应上限 512MB：GB 级工程需要分块传输（未实现）；
 - `tar_bytes` 兼容字段还在协议里，旧 peer 仍可内嵌发送（executor 两种都能处理）。
