@@ -440,14 +440,20 @@ async fn handle_project_exchange(
                     // Log the output tail: without it a failing build is
                     // invisible on the execution node.
                     if result.exit_code == 0 {
-                        info!("project task {task_id} stdout tail: {}", tail(&result.stdout, 3));
+                        info!(
+                            "project task {task_id} stdout tail: {}",
+                            tail(&result.stdout, 3)
+                        );
                     } else {
                         warn!(
                             "project task {task_id} exit={} stdout tail: {}",
                             result.exit_code,
                             tail(&result.stdout, 5)
                         );
-                        warn!("project task {task_id} stderr tail: {}", tail(&result.stderr, 10));
+                        warn!(
+                            "project task {task_id} stderr tail: {}",
+                            tail(&result.stderr, 10)
+                        );
                     }
                     let _ = forward_tx
                         .send(Event::ProjectResultReceived {

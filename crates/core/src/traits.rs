@@ -1,47 +1,11 @@
 //! Shared traits for sandbox execution and content-addressed storage.
 //!
 //! These traits define the plugin points that allow the orchestration
-//! layer to work with different sandbox backends (Wasm, containers, etc.)
-//! and different storage backends (local filesystem, distributed CAS).
+//! layer to work with different storage backends (local filesystem,
+//! distributed CAS) and with the project sandbox backend (KVM via qlean).
 
 use crate::error::Result;
-use crate::types::{ExecutionResult, Hash, ResourceLimits};
-
-// ---------------------------------------------------------------------------
-// Sandbox trait
-// ---------------------------------------------------------------------------
-
-/// A polymorphic sandbox for executing untrusted code.
-///
-/// Implementations include:
-/// - [`WasmtimeSandbox`] — WebAssembly via Wasmtime (all platforms)
-/// - [`LinuxContainerSandbox`] — Linux namespaces + cgroups (Linux only)
-///
-/// [`WasmtimeSandbox`]: (wasmtime)
-/// [`LinuxContainerSandbox`]: (container)
-pub trait Sandbox: Send + Sync {
-    /// Prepare the execution environment with the given resource limits.
-    ///
-    /// This is called before `execute_code` to set up cgroups, WASI
-    /// preopens, memory limits, etc. Must be idempotent — calling it
-    /// multiple times with the same limits should be safe.
-    fn prepare_env(&self, limits: ResourceLimits) -> Result<()>;
-
-    /// Execute bytecode inside the sandbox.
-    ///
-    /// # Arguments
-    /// * `bytecode` — The compiled module (Wasm `.wasm` bytes, native ELF, etc.)
-    ///
-    /// # Returns
-    /// An [`ExecutionResult`] containing exit code, captured stdout/stderr,
-    /// timing, and memory usage.
-    fn execute_code(&self, bytecode: Vec<u8>) -> Result<ExecutionResult>;
-
-    /// Tear down the sandbox, freeing all resources.
-    ///
-    /// After `destroy` is called, the sandbox should not be reused.
-    fn destroy(&self) -> Result<()>;
-}
+use crate::types::Hash;
 
 // ---------------------------------------------------------------------------
 // ObjectStore trait

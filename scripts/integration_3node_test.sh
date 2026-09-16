@@ -4,7 +4,6 @@ cd "$(dirname "$0")/.."
 
 echo "[1/5] build"
 cargo build -p node --quiet
-cargo build -p node --example submit_task --quiet
 
 echo "[2/5] start 3 nodes"
 rm -rf /tmp/eo-it
@@ -19,10 +18,14 @@ LEADER=$(grep -h RAFT_LEADER /tmp/eo-it/n1.log /tmp/eo-it/n2.log /tmp/eo-it/n3.l
 echo "  $LEADER"
 test -n "$LEADER" || { echo FAIL-no-leader; exit 1; }
 
-echo "[4/5] submit task"
-./target/debug/examples/submit_task /tmp/eo-it/n1.sock
-sleep 4
-grep -h "EXEC raft" /tmp/eo-it/n1.log /tmp/eo-it/n2.log /tmp/eo-it/n3.log | tail -1
+# NOTE: this script used to submit a Wasm task to prove "submit -> raft
+# schedule -> execute -> result". That execution backend was removed (see
+# docs/v3-modules/22-wasm-lane移除记录.md); the replicated log now carries node
+# registration and role changes, so this script verifies exactly that. Project
+# task execution is covered by scripts/verify_project_e2e.sh and
+# scripts/verify_agent.sh.
+echo "[4/5] replicated state after startup (node registration)"
+grep -h "Node registered" /tmp/eo-it/n1.log | tail -3 || true
 
 echo "[5/5] kill leader and re-elect"
 LEADER_ID=$(echo "$LEADER" | sed "s/.*raft_id=//")

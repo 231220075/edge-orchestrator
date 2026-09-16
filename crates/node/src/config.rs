@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use eo_core::types::{Capabilities, NodeDescriptor, NodeType, OsType, Role, RuntimeKind};
+use eo_core::types::{Capabilities, NodeDescriptor, NodeType, OsType, Role};
 use libp2p::Multiaddr;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -103,7 +103,7 @@ fn default_listen_addresses() -> Vec<String> {
 }
 
 fn default_runtimes() -> Vec<String> {
-    vec!["Wasm".into()]
+    vec!["qlean".into()]
 }
 
 fn default_max_memory_mb() -> u64 {
@@ -165,17 +165,10 @@ impl NodeConfig {
 
         let os = detect_os();
 
-        let runtimes: Vec<RuntimeKind> = self
-            .capabilities
-            .runtimes
-            .iter()
-            .filter_map(|r| match r.as_str() {
-                "Wasm" => Some(RuntimeKind::Wasm),
-                "NativePosix" => Some(RuntimeKind::NativePosix),
-                "Container" => Some(RuntimeKind::Container),
-                _ => None,
-            })
-            .collect();
+        // Runtime names are kept verbatim: they are free-form capability labels
+        // used for node-compatibility comparison. The only execution backend is
+        // the qlean project sandbox, declared by its own capability flag.
+        let runtimes: Vec<String> = self.capabilities.runtimes.clone();
 
         let roles: Vec<Role> = self
             .roles

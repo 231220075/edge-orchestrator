@@ -7,15 +7,12 @@ license.workspace = true
 [dependencies]
 eo-core.workspace = true
 
-wasmtime = "45"
 tokio.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 async-trait = "0.1"
 tracing.workspace = true
 
-[dev-dependencies]
-wat = "1"
 
 # qlean is Linux+KVM only; gate it so the workspace still builds on macOS.
 [target.'cfg(target_os = "linux")'.dependencies]

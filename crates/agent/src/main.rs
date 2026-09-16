@@ -696,9 +696,15 @@ mod tests {
         assert!(cmd.contains("deb-src::DefaultEnabled=false"), "{cmd}");
         assert!(cmd.contains("/var/lib/apt/lists/lock"), "{cmd}");
         assert!(cmd.contains("/var/lib/dpkg/lock-frontend"), "{cmd}");
-        assert!(cmd.contains("*Packages*"), "must check for a list index: {cmd}");
+        assert!(
+            cmd.contains("*Packages*"),
+            "must check for a list index: {cmd}"
+        );
         assert!(cmd.contains("mirrors.tuna.tsinghua.edu.cn"), "{cmd}");
-        assert!(cmd.contains("deb.debian.org/debian"), "keep a fallback: {cmd}");
+        assert!(
+            cmd.contains("deb.debian.org/debian"),
+            "keep a fallback: {cmd}"
+        );
         assert!(!cmd.contains("&& echo"), "must not swallow failures: {cmd}");
     }
 

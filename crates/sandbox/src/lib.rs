@@ -1,16 +1,16 @@
-//! Edge-Cloud Orchestrator — Polymorphic Sandbox Layer
+//! Edge-Cloud Orchestrator — Sandbox Layer
 //!
-//! Provides execution sandboxes for untrusted code:
-//! - **Wasmtime**: WebAssembly sandbox (all platforms)
-//! - **LinuxContainer**: Namespace+cgroup isolation (Linux only)
+//! Provides execution sandboxes:
+//! - **Qlean**: KVM virtual machine sandbox for complete projects
+//!   (workspace + build/run commands). Linux + KVM only.
+//!
+//! The WebAssembly lane (Wasmtime) and its `Sandbox` trait, container stub and
+//! `SandboxRegistry` were removed: they could not execute a workspace at all
+//! (they took pre-compiled bytecode), nothing in the product path used the
+//! registry, and the `ScheduledTask` fields they depended on were decorative.
+//! See `docs/v3-modules/22-wasm-lane移除记录.md`.
 
-pub mod container;
 pub mod qlean;
-pub mod registry;
-pub mod wasm;
 
-// Re-export core traits
-pub use eo_core::traits::{ProjectSandbox, Sandbox};
+pub use eo_core::traits::ProjectSandbox;
 pub use qlean::QleanSandbox;
-pub use registry::{default_registry, SandboxFactory, SandboxRegistry};
-pub use wasm::WasmtimeSandbox;

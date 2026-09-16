@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use crate::raft::Proposal;
-use eo_core::types::{ResourceLimits, RoutingStrategy, ScheduledTask};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use storage::LocalObjectStore;
@@ -43,36 +42,12 @@ pub struct JsonRpcErrorPayload {
 }
 
 // ── Method-specific params / results ───────────────────────────────────
+// Params for the removed Wasm-lane methods (`submit_to_cas_and_raft`,
+// `fetch_execution_result`) were dropped with them; see
+// docs/v3-modules/22-wasm-lane移除记录.md.
 
-#[derive(Debug, Deserialize)]
-struct SubmitParams {
-    code: String, // base64-encoded
-    #[serde(default = "default_code_language")]
-    code_language: String,
-    #[serde(default = "default_runtime")]
-    required_runtime: String,
-    #[serde(default = "default_routing")]
-    routing: String,
-    #[serde(default = "default_timeout")]
-    timeout_ms: u64,
-}
-
-fn default_code_language() -> String {
-    "python".into()
-}
-fn default_runtime() -> String {
-    "Wasm".into()
-}
-fn default_routing() -> String {
-    "AnyExecutor".into()
-}
 fn default_timeout() -> u64 {
     30000
-}
-
-#[derive(Debug, Deserialize)]
-struct FetchParams {
-    result_hash: String,
 }
 
 // ── Handler ────────────────────────────────────────────────────────────
@@ -113,8 +88,6 @@ impl JsonRpcHandler {
 
         let result = match request.method.as_str() {
             "get_cluster_topology" => self.get_cluster_topology().await,
-            "submit_to_cas_and_raft" => self.submit_to_cas_and_raft(request.params).await,
-            "fetch_execution_result" => self.fetch_execution_result(request.params).await,
             "submit_project" => self.submit_project(request.params).await,
             "fetch_project_result" => self.fetch_project_result(request.params).await,
             unknown => Err(json_rpc_error(
@@ -155,119 +128,6 @@ impl JsonRpcHandler {
         Ok(topology)
     }
 
-    async fn submit_to_cas_and_raft(&self, params: Value) -> Result<Value, JsonRpcErrorPayload> {
-        let SubmitParams {
-            code,
-            code_language: _code_language,
-            required_runtime,
-            routing,
-            timeout_ms,
-        } = serde_json::from_value(params)
-            .map_err(|e| json_rpc_error(-32602, format!("Invalid params: {e}")))?;
-
-        // Base64-decode the code
-        use base64::Engine;
-        let code_bytes = base64::engine::general_purpose::STANDARD
-            .decode(code.as_bytes())
-            .map_err(|e| json_rpc_error(-32602, format!("Base64 decode failed: {e}")))?;
-
-        // Enforce maximum code size (64 KB)
-        if code_bytes.len() > 64 * 1024 {
-            return Err(json_rpc_error(
-                -32001,
-                format!("Code too large: {} bytes (max 65536)", code_bytes.len()),
-            ));
-        }
-
-        // Compute hash and store blob in CAS
-        let code_hash = storage::hash_blob(&code_bytes);
-        self.object_store
-            .put_blob(&code_bytes)
-            .map_err(|e| json_rpc_error(-32002, format!("CAS store error: {e}")))?;
-
-        // Parse runtime and routing
-        let required_runtime = match required_runtime.as_str() {
-            "Wasm" => eo_core::types::RuntimeKind::Wasm,
-            "NativePosix" => eo_core::types::RuntimeKind::NativePosix,
-            "Container" => eo_core::types::RuntimeKind::Container,
-            other => {
-                return Err(json_rpc_error(-32602, format!("Unknown runtime: {other}")));
-            }
-        };
-
-        let routing = match routing.as_str() {
-            "AnyExecutor" => RoutingStrategy::AnyExecutor,
-            "PreferWasm" => RoutingStrategy::PreferWasm,
-            "PreferNative" => RoutingStrategy::PreferNative,
-            s if s.starts_with("Pinned:") => {
-                let node_id_str = s.strip_prefix("Pinned:").unwrap();
-                let node_id = uuid::Uuid::parse_str(node_id_str).map_err(|e| {
-                    json_rpc_error(-32602, format!("Invalid node_id in Pinned: {e}"))
-                })?;
-                RoutingStrategy::Pinned(node_id)
-            }
-            other => {
-                return Err(json_rpc_error(
-                    -32602,
-                    format!("Unknown routing strategy: {other}"),
-                ));
-            }
-        };
-
-        let task_id = uuid::Uuid::new_v4();
-
-        let task = ScheduledTask {
-            task_id,
-            code_hash: code_hash.clone(),
-            required_runtime,
-            routing,
-            timeout_ms,
-            resource_limits: ResourceLimits::default(),
-            submitted_at: chrono::Utc::now(),
-            pinned_node: None,
-            code_inline: Some(code_bytes.clone()),
-        };
-
-        // Propose task to Raft
-        self.raft_proposal_tx
-            .send(Proposal::SubmitTask(task))
-            .await
-            .map_err(|e| json_rpc_error(-32003, format!("Raft proposal failed: {e}")))?;
-
-        debug!("submit_to_cas_and_raft: code_hash={code_hash}, task_id={task_id}");
-
-        Ok(serde_json::json!({
-            "code_hash": code_hash,
-            "task_id": task_id.to_string(),
-        }))
-    }
-
-    async fn fetch_execution_result(&self, params: Value) -> Result<Value, JsonRpcErrorPayload> {
-        let FetchParams { result_hash } = serde_json::from_value(params)
-            .map_err(|e| json_rpc_error(-32602, format!("Invalid params: {e}")))?;
-
-        let data = self.object_store.get_blob(&result_hash).map_err(|e| {
-            let msg = format!("Object not found: {e}");
-            warn!("fetch_execution_result: {msg}");
-            json_rpc_error(-32004, msg)
-        })?;
-
-        // Try to deserialize as ExecutionResult (JSON)
-        let result: eo_core::types::ExecutionResult = serde_json::from_slice(&data)
-            .map_err(|e| json_rpc_error(-32005, format!("Corrupted result blob: {e}")))?;
-
-        use base64::Engine;
-        let stdout_b64 = base64::engine::general_purpose::STANDARD.encode(&result.stdout);
-        let stderr_b64 = base64::engine::general_purpose::STANDARD.encode(&result.stderr);
-
-        Ok(serde_json::json!({
-            "exit_code": result.exit_code,
-            "stdout": stdout_b64,
-            "stderr": stderr_b64,
-            "execution_time_ms": result.execution_time_ms,
-            "peak_memory_bytes": result.peak_memory_bytes,
-        }))
-    }
     // ── Project submission ────────────────────────────────────────────
 
     async fn submit_project(&self, params: Value) -> Result<Value, JsonRpcErrorPayload> {
@@ -411,110 +271,6 @@ mod tests {
         let result = resp.result.unwrap();
         assert!(result.get("nodes").is_some());
         assert!(result.get("tasks_completed").is_some());
-    }
-
-    #[tokio::test]
-    async fn submit_to_cas_and_raft_stores_blob_and_proposes() {
-        let (handler, _dir, mut rx) = make_handler();
-        let code = b"def hello(): return 42";
-
-        use base64::Engine;
-        let code_b64 = base64::engine::general_purpose::STANDARD.encode(code);
-
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            method: "submit_to_cas_and_raft".into(),
-            params: serde_json::json!({
-                "code": code_b64,
-                "required_runtime": "Wasm",
-                "routing": "AnyExecutor",
-            }),
-            id: Value::Number(2.into()),
-        };
-
-        let resp = handler.handle(req).await;
-        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
-
-        let result = resp.result.unwrap();
-        let code_hash = result["code_hash"].as_str().unwrap();
-        let task_id = result["task_id"].as_str().unwrap();
-        assert!(!code_hash.is_empty());
-        assert!(!task_id.is_empty());
-
-        // Verify blob is retrievable
-        let hash_string = code_hash.to_string();
-        let data = handler.object_store.get_blob(&hash_string).unwrap();
-        assert_eq!(data, code);
-
-        // Verify proposal was sent
-        let proposal = rx.try_recv().unwrap();
-        match proposal {
-            Proposal::SubmitTask(task) => {
-                assert_eq!(task.code_hash, code_hash);
-                assert_eq!(task.task_id.to_string(), task_id);
-            }
-            other => panic!("expected SubmitTask, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn fetch_execution_result_retrieves_stored_result() {
-        let (handler, _dir, _rx) = make_handler();
-
-        // Store an ExecutionResult
-        let exec_result = eo_core::types::ExecutionResult {
-            exit_code: 0,
-            stdout: b"Hello, world!".to_vec(),
-            stderr: vec![],
-            execution_time_ms: 42,
-            peak_memory_bytes: 8192,
-            result_hash: None,
-        };
-        let result_json = serde_json::to_vec(&exec_result).unwrap();
-        let result_hash = handler.object_store.put_blob(&result_json).unwrap();
-
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            method: "fetch_execution_result".into(),
-            params: serde_json::json!({"result_hash": result_hash}),
-            id: Value::Number(3.into()),
-        };
-
-        let resp = handler.handle(req).await;
-        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
-
-        let result = resp.result.unwrap();
-        assert_eq!(result["exit_code"], 0);
-        assert_eq!(result["execution_time_ms"], 42);
-        assert_eq!(result["peak_memory_bytes"], 8192);
-
-        // Decode stdout
-        use base64::Engine;
-        let stdout_bytes = base64::engine::general_purpose::STANDARD
-            .decode(result["stdout"].as_str().unwrap())
-            .unwrap();
-        assert_eq!(stdout_bytes, b"Hello, world!");
-    }
-
-    #[tokio::test]
-    async fn submit_rejects_oversized_code() {
-        let (handler, _dir, _rx) = make_handler();
-        // 65KB of zeros
-        let big_code = vec![0u8; 65 * 1024];
-
-        use base64::Engine;
-        let code_b64 = base64::engine::general_purpose::STANDARD.encode(&big_code);
-
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            method: "submit_to_cas_and_raft".into(),
-            params: serde_json::json!({"code": code_b64}),
-            id: Value::Number(4.into()),
-        };
-
-        let resp = handler.handle(req).await;
-        assert!(resp.error.is_some());
-        assert_eq!(resp.error.as_ref().unwrap().code, -32001);
     }
 
     #[tokio::test]

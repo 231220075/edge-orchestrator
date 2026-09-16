@@ -237,7 +237,10 @@ mod linux {
                     )));
                 }
             }
-            tracing::info!("qlean: cold boot done in {}ms", boot_start.elapsed().as_millis());
+            tracing::info!(
+                "qlean: cold boot done in {}ms",
+                boot_start.elapsed().as_millis()
+            );
             *machine = Some(m);
         } else {
             tracing::info!("qlean: reusing cached VM");
@@ -334,7 +337,11 @@ mod linux {
 
         let run_cmd = format!("cd {work} && {}", spec.run_cmd.join(" "));
         let budget = phase_budget(deadline, PhaseBudget::Run);
-        tracing::info!("qlean run start (budget {}s): {}", budget.as_secs(), spec.run_cmd.join(" "));
+        tracing::info!(
+            "qlean run start (budget {}s): {}",
+            budget.as_secs(),
+            spec.run_cmd.join(" ")
+        );
         let r = match timeout(budget, vm.exec(&run_cmd)).await {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => return Err(CoreError::SandboxExecution(format!("run: {e}"))),

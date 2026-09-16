@@ -204,13 +204,13 @@ impl ProjectClient {
             return TaskState::Failed(format!("unknown task_id {task_id}"));
         };
         match state {
-            TaskState::Dispatched if dispatched_at.elapsed() > RESULT_GRACE => TaskState::Failed(
-                format!(
+            TaskState::Dispatched if dispatched_at.elapsed() > RESULT_GRACE => {
+                TaskState::Failed(format!(
                     "no result within {}s (executor did not answer: check the execution node's \
                      logs and whether its project executor is reachable)",
                     RESULT_GRACE.as_secs()
-                ),
-            ),
+                ))
+            }
             other => other.clone(),
         }
     }

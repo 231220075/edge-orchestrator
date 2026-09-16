@@ -76,8 +76,9 @@ pub struct Capabilities {
     pub storage: bool,
     /// Whether GPU acceleration is available.
     pub gpu_acceleration: bool,
-    /// Which execution runtimes this node supports.
-    pub runtimes: Vec<RuntimeKind>,
+    /// Runtime names this node advertises (free-form strings, e.g. "qlean").
+    /// Only used for node-compatibility comparison when roles are re-assigned.
+    pub runtimes: Vec<String>,
     /// Maximum memory available for sandbox execution, in megabytes.
     pub max_memory_mb: u64,
     /// Number of CPU cores available for execution.
@@ -94,23 +95,12 @@ impl Default for Capabilities {
         Self {
             storage: true,
             gpu_acceleration: false,
-            runtimes: vec![RuntimeKind::Wasm],
+            runtimes: vec!["qlean".to_string()],
             max_memory_mb: 1024,
             cpu_cores: 2,
             project_sandbox: false,
         }
     }
-}
-
-/// Kinds of execution runtimes a node can provide.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum RuntimeKind {
-    /// WebAssembly runtime (Wasmtime) — available on all platforms.
-    Wasm,
-    /// Native POSIX process execution (Linux container/namespace sandbox).
-    NativePosix,
-    /// Docker/OCI container execution.
-    Container,
 }
 
 /// A role assigned to a node by the orchestration engine.
@@ -143,45 +133,6 @@ impl std::fmt::Display for Role {
     }
 }
 
-/// A unit of work scheduled onto the cluster.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ScheduledTask {
-    /// Unique identifier for this task.
-    pub task_id: TaskId,
-    /// The code/bytecode to execute, content-addressed by its hash.
-    pub code_hash: Hash,
-    /// What kind of runtime is required to execute this task.
-    pub required_runtime: RuntimeKind,
-    /// Preferred routing strategy for the scheduler.
-    pub routing: RoutingStrategy,
-    /// Execution timeout in milliseconds.
-    pub timeout_ms: u64,
-    /// Resource limits for sandbox execution.
-    pub resource_limits: ResourceLimits,
-    /// When this task was submitted.
-    pub submitted_at: DateTime<Utc>,
-    /// Optional: pin execution to a specific node.
-    pub pinned_node: Option<NodeId>,
-
-    /// Optional inline code bytes. v3 demo shortcut: avoids requiring blob
-    /// distribution over P2P. Production should use code_hash + CAS sync.
-    #[serde(default)]
-    pub code_inline: Option<Vec<u8>>,
-}
-
-/// Routing strategy for task-to-node assignment.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum RoutingStrategy {
-    /// Send to any node with the Execution role.
-    AnyExecutor,
-    /// Send to a specific node.
-    Pinned(NodeId),
-    /// Prefer a Wasm executor if available.
-    PreferWasm,
-    /// Prefer a native (container/process) executor if available.
-    PreferNative,
-}
-
 /// Resource limits enforced by the sandbox layer during execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceLimits {
@@ -189,11 +140,11 @@ pub struct ResourceLimits {
     pub max_memory_mb: u64,
     /// Maximum CPU time in milliseconds.
     pub max_cpu_time_ms: u64,
-    /// Maximum disk space in megabytes (for WASI preopened dirs).
+    /// Maximum disk space in megabytes.
     pub max_disk_mb: u64,
     /// Whether network access is allowed.
     pub allow_network: bool,
-    /// Maximum number of WASI file descriptors.
+    /// Maximum number of file descriptors.
     pub max_fds: u32,
 }
 
@@ -210,8 +161,7 @@ impl Default for ResourceLimits {
 }
 
 /// A project-level execution request: a working tree plus build/run commands.
-/// This is what the Linux+KVM (qlean) sandbox consumes, as opposed to the
-/// bytecode-oriented  used by the Wasm sandbox.
+/// This is what the Linux+KVM (qlean) sandbox consumes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectSpec {
     /// Content hash of the project snapshot (a tar blob in CAS). Used in the
@@ -311,10 +261,11 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_default_has_wasm() {
+    fn capabilities_default_advertises_the_project_runtime() {
         let caps = Capabilities::default();
-        assert!(caps.runtimes.contains(&RuntimeKind::Wasm));
+        assert!(caps.runtimes.iter().any(|r| r == "qlean"));
         assert!(!caps.gpu_acceleration);
+        assert!(!caps.project_sandbox, "must be opted in by config");
     }
 
     #[test]
@@ -329,25 +280,6 @@ mod tests {
         assert_eq!(Role::Storage.to_string(), "Storage");
         assert_eq!(Role::Execution.to_string(), "Execution");
         assert_eq!(Role::Inference.to_string(), "Inference");
-    }
-
-    #[test]
-    fn scheduled_task_serde_roundtrip() {
-        let task = ScheduledTask {
-            task_id: Uuid::new_v4(),
-            code_hash: "abc123".into(),
-            required_runtime: RuntimeKind::Wasm,
-            routing: RoutingStrategy::AnyExecutor,
-            timeout_ms: 5000,
-            resource_limits: ResourceLimits::default(),
-            submitted_at: Utc::now(),
-            pinned_node: None,
-            code_inline: None,
-        };
-
-        let json = serde_json::to_string(&task).expect("serialize");
-        let task2: ScheduledTask = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(task, task2);
     }
 
     #[test]

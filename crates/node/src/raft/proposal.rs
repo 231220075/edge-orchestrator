@@ -2,8 +2,11 @@
 //!
 //! Proposals are the operations that can be submitted to the Raft cluster
 //! for replication and commitment.
+//!
+//! Task submission/assignment/completion variants were removed with the Wasm
+//! lane; see `docs/v3-modules/22-wasm-lane移除记录.md`.
 
-use eo_core::types::{NodeDescriptor, NodeId, Role, ScheduledTask, TaskId};
+use eo_core::types::{NodeDescriptor, NodeId, Role};
 use serde::{Deserialize, Serialize};
 
 /// A proposal submitted to the Raft cluster for consensus.
@@ -36,26 +39,6 @@ pub enum Proposal {
         /// The role to revoke.
         role: Role,
     },
-
-    /// Submit a task for execution.
-    SubmitTask(ScheduledTask),
-
-    /// Mark a task as completed, storing its result hash.
-    CompleteTask {
-        /// The ID of the completed task.
-        task_id: TaskId,
-        /// CAS hash of the execution result.
-        result_hash: String,
-    },
-
-    /// Assign a queued task to a specific executor (raft id) for execution.
-    /// The executor processes it and later submits CompleteTask.
-    AssignTask {
-        /// The task being assigned.
-        task_id: TaskId,
-        /// The raft id of the executor node.
-        executor_raft_id: u64,
-    },
 }
 
 impl Proposal {
@@ -83,10 +66,6 @@ pub enum ApplyResult {
     RoleAssigned { node_id: NodeId, role: Role },
     /// Role was revoked.
     RoleRevoked { node_id: NodeId, role: Role },
-    /// Task was submitted.
-    TaskSubmitted(TaskId),
-    /// Task was completed.
-    TaskCompleted(TaskId),
     /// Proposal was rejected (invalid state transition).
     Rejected(String),
 }

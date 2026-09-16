@@ -58,9 +58,12 @@ fn sandbox_preflight() {
         );
     }
 
-    let helper = ["/usr/lib/qemu/qemu-bridge-helper", "/usr/libexec/qemu-bridge-helper"]
-        .iter()
-        .find(|p| Path::new(p).exists());
+    let helper = [
+        "/usr/lib/qemu/qemu-bridge-helper",
+        "/usr/libexec/qemu-bridge-helper",
+    ]
+    .iter()
+    .find(|p| Path::new(p).exists());
     match helper {
         Some(_) => debug!("preflight: qemu-bridge-helper found"),
         None => warn!("preflight: qemu-bridge-helper not found — install qemu-system-common"),
@@ -86,7 +89,9 @@ fn sandbox_preflight() {
         ])
         .status()
     {
-        Ok(st) if st.success() => info!("preflight: upstream Debian mirror reachable from this host"),
+        Ok(st) if st.success() => {
+            info!("preflight: upstream Debian mirror reachable from this host")
+        }
         _ => warn!(
             "preflight: cannot reach deb.debian.org from this host — project toolchain installs \
              will fail; run ./scripts/host_network_check.sh for details"

@@ -12,7 +12,7 @@ capabilities:
   storage: true
   gpu_acceleration: false
   runtimes:
-    - "Wasm"
+    - "qlean"
   max_memory_mb: 4096
   cpu_cores: 2
   project_sandbox: true

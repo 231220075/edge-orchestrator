@@ -139,9 +139,9 @@ use tracing::debug;
 mod tests {
     use super::*;
     use chrono::Utc;
-    use eo_core::types::{Capabilities, NodeDescriptor, NodeType, OsType, RuntimeKind};
+    use eo_core::types::{Capabilities, NodeDescriptor, NodeType, OsType};
 
-    fn make_descriptor(id: &str, roles: Vec<Role>, runtimes: Vec<RuntimeKind>) -> NodeDescriptor {
+    fn make_descriptor(id: &str, roles: Vec<Role>, runtimes: Vec<String>) -> NodeDescriptor {
         NodeDescriptor {
             node_id: uuid::Uuid::parse_str(id).unwrap(),
             node_type: NodeType::Heavy,
@@ -175,12 +175,12 @@ mod tests {
             engine.register_node(make_descriptor(
                 "660e8400-e29b-41d4-a716-446655440000",
                 vec![Role::Execution],
-                vec![RuntimeKind::Wasm],
+                vec!["qlean".to_string()],
             ));
             engine.register_node(make_descriptor(
                 "770e8400-e29b-41d4-a716-446655440000",
                 vec![],
-                vec![RuntimeKind::Wasm],
+                vec!["qlean".to_string()],
             ));
 
             // When the executor fails, the backup should get the role
@@ -202,7 +202,7 @@ mod tests {
             engine.register_node(make_descriptor(
                 "660e8400-e29b-41d4-a716-446655440000",
                 vec![Role::Execution],
-                vec![RuntimeKind::Container], // specialized runtime
+                vec!["container".to_string()], // specialized runtime
             ));
 
             let result = engine.handle_node_failure(exec_id).await.unwrap();
